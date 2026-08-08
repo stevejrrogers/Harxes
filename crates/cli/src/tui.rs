@@ -185,17 +185,7 @@ fn chat_pane(frame: &mut Frame, state: &mut AppState, area: Rect) {
             },
         ]));
     }
-    // Idle blinking cursor so the chat always feels live.
-    if state.typing_text.is_empty() && !state.processing {
-        if state.spinner.is_multiple_of(2) {
-            text.push_line(Line::from(vec![Span::styled(
-                "▋",
-                Style::new().fg(Color::Cyan),
-            )]));
-        } else {
-            text.push_line(Line::raw(""));
-        }
-    }
+
     let para = Paragraph::new(text)
         .style(Style::default())
         .wrap(ratatui::widgets::Wrap { trim: true })
@@ -267,8 +257,8 @@ fn tasks_panel(frame: &mut Frame, state: &AppState, area: Rect) {
 
 fn input_pane(frame: &mut Frame, state: &AppState, area: Rect) {
     let prompt_style = Style::new().fg(Color::Green).bold();
-    // Blinking cursor: visible on even frames.
-    let cur = if state.spinner.is_multiple_of(2) {
+    // Blinking cursor: visible 3 frames, hidden 2 (~slow blink).
+    let cur = if state.spinner % 5 < 3 {
         Span::styled("▋", Style::new().fg(Color::Cyan))
     } else {
         Span::raw(" ")
