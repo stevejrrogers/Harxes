@@ -39,6 +39,8 @@ pub struct AppState {
     pub hist_pos: Option<usize>,
     pub auto_scroll: bool,
     pub spinner: u32,
+    pub typing_text: String,
+    pub typing_shown: usize,
 }
 
 impl AppState {
@@ -59,6 +61,8 @@ impl AppState {
             hist_pos: None,
             auto_scroll: true,
             spinner: 0,
+            typing_text: String::new(),
+            typing_shown: 0,
         }
     }
 }
@@ -180,6 +184,14 @@ fn chat_pane(frame: &mut Frame, state: &mut AppState, area: Rect) {
                 ]));
             }
         }
+        // Typewriter reveal of the most recent agent response.
+        if !state.typing_text.is_empty() {
+            let shown = &state.typing_text[..state.typing_shown.min(state.typing_text.len())];
+            text.push_line(Line::from(vec![
+                Span::styled("✦ ", Style::new().fg(Color::Magenta).bold()),
+                Span::raw(shown.to_string()),
+            ]));
+        }
     }
     let para = Paragraph::new(text)
         .style(Style::default().bg(BG_CHAT).fg(Color::White))
@@ -275,6 +287,15 @@ pub fn run(
     loop {
         if state.processing {
             state.spinner = state.spinner.wrapping_add(1);
+        }
+        // Advance the typewriter reveal by a few chars per frame.
+        if !state.typing_text.is_empty() && state.typing_shown < state.typing_text.len() {
+            state.typing_shown = (state.typing_shown + 3).min(state.typing_text.len());
+        } else if !state.typing_text.is_empty() && state.typing_shown >= state.typing_text.len() {
+            // done revealing: finalize into a real Agent line.
+            let done = std::mem::take(&mut state.typing_text);
+            state.lines.push(ChatLine::Agent(done));
+            state.auto_scroll = true;
         }
         poll_events(state);
         terminal.draw(|f| draw(f, state))?;
@@ -438,8 +459,10 @@ mod tests {
         ));
         st.lines.push(ChatLine::Tool("Bash echo hi".into()));
         st.input = "my input here".to_string();
-        st.processing = true;
-        st.spinner = 2;
+        	st.processing=true;
+        	st.spinner=2;
+        	st.typing_text="streaming demo: This is revealed gradually.".to_string();
+        	st.typing_shown=28;
         let backend = TestBackend::new(120, 24);
         let mut terminal = Terminal::new(backend).unwrap();
         terminal.draw(|f| draw(f, &mut st)).unwrap();

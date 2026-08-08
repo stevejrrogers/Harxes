@@ -335,7 +335,13 @@ fn run_repl(wiring: &compose::Wiring, cli: &Cli) {
                 match ev {
                     Ok((lines, tokens, new_hist)) => {
                         for l in lines {
-                            st.lines.push(l);
+                            match l {
+                                tui::ChatLine::Agent(txt) => {
+                                    st.typing_text = txt;
+                                    st.typing_shown = 0;
+                                }
+                                other => st.lines.push(other),
+                            }
                         }
                         st.status.total_tokens += tokens;
                         let m = st.status.model.clone();
