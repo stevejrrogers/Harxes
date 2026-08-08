@@ -169,6 +169,8 @@ fn run_repl(wiring: &compose::Wiring, cli: &Cli) {
     ui::tui_mode(true);
     use std::cell::RefCell;
     let trx = RefCell::new(transcript);
+    // Current active session id; mutable so /resume can switch mid-session.
+    let sess_cell = RefCell::new(session_id.clone());
 
     use std::rc::Rc;
     let model_cell = Rc::new(RefCell::new(model));
@@ -199,7 +201,8 @@ fn run_repl(wiring: &compose::Wiring, cli: &Cli) {
             // Slash commands handled here.
             match t.as_str() {
                 "/help" => {
-                    st.lines.push(tui::ChatLine::Agent(String ::from("/help      this help\n/clear     clear the screen\n/cost      total tokens used\n/model X   switch model\n/compact   summarize context\n/sessions  list saved sessions\n/remember X save a note to agent memory\n/export F  write transcript to file F.md\n/cost      tokens + estimated cost\n/exit      quit")));
+                    st.lines.push(tui::ChatLine::Agent(String ::from("/help      this help\n/clear     clear the screen\n/cost      total tokens used\n/model X   switch model\n/compact   summarize context\n/sessions  list saved sessions\n/remember X save a note to agent memory\n/resume I  load saved session by id
+/export F  write transcript to file F.md\n/cost      tokens + estimated cost\n/exit      quit")));
                     return;
                 }
                 "/cost" => {
@@ -225,6 +228,35 @@ fn run_repl(wiring: &compose::Wiring, cli: &Cli) {
                         let n = store.load(id).map(|r| r.transcript.len()).unwrap_or(0);
                         st.lines
                             .push(tui::ChatLine::Tool(format!("{id}  ({n} msgs)")));
+                    }
+                    return;
+                }
+                _ if t.starts_with("/resume ") => {
+                    let id = t.trim_start_matches("/resume ").trim().to_string();
+                    if id.is_empty() {
+                        st.lines.push(tui::ChatLine::Agent(String::from(
+                            "usage: /resume <session-id>",
+                        )));
+                        return;
+                    }
+                    let store = JsonSessionStore::new(config_dir.clone());
+                    match store.load(&id) {
+                        Some(rec) => {
+                            *trx.borrow_mut() = rec.transcript.clone();
+                            *sess_cell.borrow_mut() = id.clone();
+                            st.lines.clear();
+                            for m in &rec.transcript {
+                                if m.role == Role::User {
+                                    st.lines.push(tui::ChatLine::User(m.content.clone()));
+                                }
+                            }
+                            st.scroll = 0;
+                            st.lines
+                                .push(tui::ChatLine::Tool(format!("resumed session {id}")));
+                        }
+                        None => st
+                            .lines
+                            .push(tui::ChatLine::Agent(format!("no session {id}"))),
                     }
                     return;
                 }
@@ -337,10 +369,11 @@ fn run_repl(wiring: &compose::Wiring, cli: &Cli) {
                             "usage: /remember <note>",
                         )));
                     } else {
-                        match ctx_store.remember_session(&session_id, &note) {
+                        let cur_sid = sess_cell.borrow().clone();
+                        match ctx_store.remember_session(&cur_sid, &note) {
                             Ok(_) => {
                                 let _ =
-                                    ctx_store.remember_workspace(&format!("[{session_id}] {note}"));
+                                    ctx_store.remember_workspace(&format!("[{cur_sid}] {note}"));
                                 st.lines
                                     .push(tui::ChatLine::Tool(format!("remembered: {note}")));
                             }
@@ -370,7 +403,7 @@ fn run_repl(wiring: &compose::Wiring, cli: &Cli) {
             let pid_str = wiring.provider_id.clone();
             let cfg_dir = config_dir.clone();
             let ctx_for_turn = ctx_store.clone();
-            let sid = session_id.clone();
+            let sid = sess_cell.borrow().clone();
             let limits = wiring.limits.clone();
             let history_snapshot = trx.borrow().clone();
             let txc = tx.clone();
