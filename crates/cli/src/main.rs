@@ -530,21 +530,41 @@ async fn run_turn_owned(
                 created_at: String::new(),
                 transcript: new_hist.clone(),
             });
-            let mut tool_names: Vec<String> = Vec::new();
+            let mut lines = vec![tui::ChatLine::Agent(res.outcome.final_text.clone())];
+            // Detailed per-tool blocks: pair each requested call with its result.
+            let mut results: std::collections::HashMap<String, String> = Default::default();
             for m in &new_hist {
-                for tc in &m.tool_calls {
-                    if !tool_names.contains(&tc.name) {
-                        tool_names.push(tc.name.clone());
+                if m.role == Role::Tool {
+                    if let Some(id) = &m.tool_call_id {
+                        results.insert(id.clone(), m.content.clone());
                     }
                 }
             }
-            let mut lines = vec![tui::ChatLine::Agent(res.outcome.final_text.clone())];
-            for tn in &tool_names {
-                lines.push(tui::ChatLine::Tool(format!("ran {tn}")));
+            for m in &new_hist {
+                for tc in &m.tool_calls {
+                    let detail = tool_preview(tc.name.as_str(), tc.arguments.as_str());
+                    match results.get(&tc.id) {
+                        Some(out) => {
+                            lines.push(tui::ChatLine::Tool(format!("{detail}\n    → {out}")))
+                        }
+                        None => lines.push(tui::ChatLine::Tool(detail)),
+                    }
+                }
             }
+
             Ok((lines, in_tok, out_tok, new_hist))
         }
         Err(e) => Err(e.to_string()),
+    }
+}
+
+/// Compact one-line label for a tool invocation, e.g. "Bash: echo hi".
+fn tool_preview(name: &str, args: &str) -> String {
+    let trimmed = args.trim();
+    if trimmed.is_empty() {
+        name.to_string()
+    } else {
+        format!("{name}: {}", &trimmed[..trimmed.len().min(80)])
     }
 }
 
@@ -557,4 +577,19 @@ fn estimate_cost(model: &str, tokens: u64) -> f64 {
         _ => 0.001,
     };
     (tokens as f64) / 1000.0 * per_1k
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn tool_preview_formats() {
+        assert_eq!(tool_preview("Bash", "echo hi"), "Bash: echo hi");
+        assert_eq!(tool_preview("Read", ""), "Read");
+        // long args truncated
+        let long = "x".repeat(200);
+        let p = tool_preview("Write", &long);
+        assert!(p.len() < 100);
+    }
 }
