@@ -2,7 +2,7 @@
 //! Title bar, scrollable chat pane with avatars and syntax highlighting,
 //! a right-side status panel, and a separate input box at the bottom.
 
-use crossterm::event::{self, Event, KeyCode};
+use crossterm::event::{self, Event, KeyCode, KeyModifiers};
 use ratatui::{
     prelude::*,
     widgets::{Block, Borders, Paragraph},
@@ -426,25 +426,37 @@ fn tasks_panel(frame: &mut Frame, state: &AppState, area: Rect) {
 
 fn input_pane(frame: &mut Frame, state: &AppState, area: Rect) {
     let prompt_style = Style::new().fg(Color::Green).bold();
-    // Blinking cursor: visible 3 frames, hidden 2 (~slow blink).
     let cur = if state.spinner % 5 < 3 {
         Span::styled("▋", Style::new().fg(Color::Cyan))
     } else {
         Span::raw(" ")
     };
-    let mut content = Vec::new();
-    content.push(Span::styled("❯ ", prompt_style));
+    let mut lines: Vec<Line> = Vec::new();
     if state.input.is_empty() && !state.processing {
-        content.push(Span::styled(
-            "Type a message...",
-            Style::new().fg(Color::DarkGray),
-        ));
+        lines.push(Line::from(vec![
+            Span::styled("Type a message...", Style::new().fg(Color::DarkGray)),
+            cur,
+        ]));
     } else {
-        content.push(Span::raw(state.input.clone()));
+        let parts: Vec<&str> = state.input.split('\n').collect();
+        for (i, part) in parts.iter().enumerate() {
+            let is_last = i == parts.len() - 1;
+            if is_last {
+                lines.push(Line::from(vec![
+                    Span::styled("❯ ", prompt_style),
+                    Span::raw(part.to_string()),
+                    cur.clone(),
+                ]));
+            } else {
+                lines.push(Line::from(vec![
+                    Span::styled("❯ ", prompt_style),
+                    Span::raw(part.to_string()),
+                ]));
+            }
+        }
     }
-    content.push(cur);
     frame.render_widget(
-        Paragraph::new(Line::from(content)).style(Style::default().bg(BG_INPUT).fg(Color::White)),
+        Paragraph::new(lines).style(Style::default().bg(BG_INPUT).fg(Color::White)),
         area,
     );
 }
@@ -455,9 +467,11 @@ pub fn draw(frame: &mut Frame, state: &mut AppState) {
         .direction(Direction::Horizontal)
         .constraints([Constraint::Percentage(68), Constraint::Percentage(32)])
         .split(area);
+    let nlines = (state.input.matches('\n').count() as u16) + 1;
+    let in_h = nlines.saturating_add(2).min(10);
     let left = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([Constraint::Min(1), Constraint::Length(3)])
+        .constraints([Constraint::Min(1), Constraint::Length(in_h)])
         .split(cols[0]);
     // Right column: status sized to its content at top; tasks fill the rest.
     let r = cols[1];
@@ -532,6 +546,18 @@ pub fn run(
                             state.completions.clear();
                             continue;
                         }
+                        let has_mod = k.modifiers.contains(KeyModifiers::CONTROL)
+                            || k.modifiers.contains(KeyModifiers::ALT);
+                        let trimmed = state.input.trim();
+                        let is_slash_cmd = trimmed.starts_with('/');
+                        // Multi-line composing: plain Enter inserts a newline unless
+                        // a modifier forces a send, or it is a slash command.
+                        if !has_mod && !is_slash_cmd {
+                            if !state.input.ends_with('\n') {
+                                state.input.push('\n');
+                            }
+                            continue;
+                        }
                         let msg = std::mem::take(&mut state.input);
                         let t = msg.trim();
                         if t == "/exit" {
@@ -549,7 +575,6 @@ pub fn run(
                         }
                         state.auto_scroll = true;
                         if !t.is_empty() {
-                            // remember for input history
                             if state.history.last().map(String::as_str) != Some(t) {
                                 state.history.push(t.to_string());
                             }
@@ -614,6 +639,11 @@ pub fn run(
                     KeyCode::Esc => {
                         if !state.completions.is_empty() {
                             state.completions.clear();
+                        } else if state.input.contains('\n') {
+                            // Exit multi-line compose: drop the trailing line.
+                            if let Some(pos) = state.input.rfind('\n') {
+                                state.input.truncate(pos);
+                            }
                         } else {
                             break;
                         }
@@ -773,7 +803,7 @@ mod tests {
             "Here is code:\n```rust\nfn main(){}\n```".into(),
         ));
         st.lines.push(ChatLine::Tool("Bash echo hi".into()));
-        st.input = "my input here".to_string();
+        st.input = "line one\nline two".to_string();
         st.set_plan(vec![
             "write code".to_string(),
             "test it".to_string(),
