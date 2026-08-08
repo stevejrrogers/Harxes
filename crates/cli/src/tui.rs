@@ -27,6 +27,40 @@ pub struct StatusInfo {
     pub total_tokens: u64,
     pub tools_used: Vec<String>,
     pub total_cost: f64,
+    pub cwd: String,
+    pub git_branch: Option<String>,
+}
+
+/// Short label for the current working directory (last 2 segments).
+fn current_dir_label() -> String {
+    let cwd = std::env::current_dir()
+        .map(|p| p.display().to_string())
+        .unwrap_or_default();
+    let home = std::env::var("HOME").unwrap_or_default();
+    let shown = if !home.is_empty() && cwd.starts_with(&home) {
+        format!("~{}", &cwd[home.len()..])
+    } else {
+        cwd
+    };
+    shown
+}
+
+/// Detect the current git branch by walking up from the CWD looking for
+/// `.git/HEAD` (no subprocess).
+fn current_git_branch() -> Option<String> {
+    use std::fs;
+    let mut dir = std::env::current_dir().ok()?;
+    loop {
+        let head = fs::read_to_string(dir.join(".git").join("HEAD"));
+        if let Ok(content) = head {
+            if let Some(branch) = content.strip_prefix("ref: refs/heads/") {
+                return Some(branch.trim().to_string());
+            }
+        }
+        if !dir.pop() {
+            return None;
+        }
+    }
 }
 
 pub struct AppState {
@@ -59,6 +93,8 @@ impl AppState {
                 total_tokens: 0,
                 tools_used: vec![],
                 total_cost: 0.0,
+                cwd: current_dir_label(),
+                git_branch: current_git_branch(),
             },
             history: vec![],
             hist_pos: None,
@@ -200,6 +236,16 @@ fn status_panel(frame: &mut Frame, state: &AppState, area: Rect) {
         Style::new().fg(Color::Magenta).bold(),
     )]));
     text.push_line(Line::from(vec![Span::raw("")]));
+    text.push_line(Line::from(vec![
+        Span::styled("dir      ", Style::new().fg(Color::White).bold()),
+        Span::raw(state.status.cwd.clone()),
+    ]));
+    if let Some(b) = &state.status.git_branch {
+        text.push_line(Line::from(vec![
+            Span::styled("branch   ", Style::new().fg(Color::Magenta).bold()),
+            Span::raw(format!("⎇ {b}")),
+        ]));
+    }
     text.push_line(Line::from(vec![
         Span::styled("provider ", Style::new().fg(Color::Cyan).bold()),
         Span::raw(state.status.provider.clone()),
