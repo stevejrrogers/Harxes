@@ -274,7 +274,7 @@ fn input_pane(frame: &mut Frame, state: &AppState, area: Rect) {
                 Block::default()
                     .borders(Borders::LEFT | Borders::TOP)
                     .border_type(ratatui::widgets::BorderType::Thick)
-                    .border_style(Style::new().fg(Color::Green)),
+                    .border_style(Style::new().fg(Color::DarkGray)),
             ),
         area,
     );
@@ -287,7 +287,7 @@ pub fn draw(frame: &mut Frame, state: &mut AppState) {
         .constraints([
             Constraint::Length(1),
             Constraint::Min(1),
-            Constraint::Length(2),
+            Constraint::Length(3),
         ])
         .split(area);
     title_bar(frame, state, outer[0]);
