@@ -569,13 +569,11 @@ pub fn run(
                             state.completions.clear();
                             continue;
                         }
-                        let has_mod = k.modifiers.contains(KeyModifiers::CONTROL)
-                            || k.modifiers.contains(KeyModifiers::ALT);
-                        let trimmed = state.input.trim();
-                        let is_slash_cmd = trimmed.starts_with('/');
-                        // Multi-line composing: plain Enter inserts a newline unless
-                        // a modifier forces a send, or it is a slash command.
-                        if !has_mod && !is_slash_cmd {
+                        let wants_newline = k.modifiers.contains(KeyModifiers::ALT)
+                            || k.modifiers.contains(KeyModifiers::SHIFT);
+                        // Multi-line composing: Alt or Shift + Enter inserts a new
+                        // line; plain Enter always submits.
+                        if wants_newline {
                             if !state.input.ends_with('\n') {
                                 state.input.push('\n');
                             }
