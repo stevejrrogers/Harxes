@@ -534,6 +534,37 @@ mod tests {
         assert!(ok.starts_with("wrote"));
     }
 
+    // E2E: a dangerous bash command is gated by the decider (returns denied).
+    #[tokio::test]
+    async fn dangerous_bash_is_gated_by_decider() {
+        use harxes_core_domain::ports::PermissionDecider;
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        struct DenyAll(AtomicBool);
+        impl PermissionDecider for DenyAll {
+            fn decide_write(&self, _: &str) -> bool {
+                true
+            }
+            fn decide_bash(&self, _: &str) -> bool {
+                !self.0.load(Ordering::SeqCst)
+            }
+        }
+
+        let shell = Arc::new(FakeShell);
+        let fsys = Arc::new(FakeFs);
+        let llm = Arc::new(FakeLlmScript(Mutex::new(vec![])));
+        let gate = Arc::new(DenyAll(AtomicBool::new(true))); // deny first
+        let a = AgentLoop::new(llm, shell, fsys).with_decider(gate);
+
+        // Dangerous prefix -> decider consulted and denies.
+        let denied = a.run_bash("rm -rf /").await;
+        assert!(denied.contains("permission denied"), "got: {denied}");
+
+        // Safe command runs without consulting the decider.
+        let ran = a.run_bash("echo hi").await;
+        assert!(ran.contains("exit=0"));
+    }
+
     #[tokio::test]
     async fn persists_session_on_completion() {
         use harxes_core_domain::ports::{SessionRecord, SessionStorePort};
