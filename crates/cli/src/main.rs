@@ -217,8 +217,7 @@ fn run_repl(wiring: &compose::Wiring, cli: &Cli) {
             // Slash commands handled here.
             match t.as_str() {
                 "/help" => {
-                    st.lines.push(tui::ChatLine::Agent(String ::from("/help      this help\n/clear     clear the screen\n/cost      total tokens used\n/model X   switch model\n/compact   summarize context\n/sessions  list saved sessions\n/remember X save a note to agent memory\n/resume I  load saved session by id
-/export F  write transcript to file F.md\n/cost      tokens + estimated cost\n/exit      quit")));
+                    st.lines.push(tui::ChatLine::Agent(String ::from("/help      this help\n/clear     clear the screen\n/cost      total tokens used\n/model X   switch model\n/compact   summarize context\n/sessions  list saved sessions\n/remember X save a note to agent memory\n/resume I  load saved session by id\n/plan T    break task T into a checklist\n/todo done N   tick item N on the plan\n/export F  write transcript to file F.md\n/cost      tokens + estimated cost\n/exit      quit")));
                     return;
                 }
                 "/cost" => {
@@ -276,6 +275,80 @@ fn run_repl(wiring: &compose::Wiring, cli: &Cli) {
                     }
                     return;
                 }
+                _ if t.starts_with("/plan") => {
+                    let task = t.trim_start_matches("/plan").trim().to_string();
+                    if task.is_empty() {
+                        st.lines
+                            .push(tui::ChatLine::Agent(String::from("usage: /plan <task>")));
+                        return;
+                    }
+                    st.processing = true;
+                    let cur_model = model_cell.borrow().clone();
+                    let pid2 = make_pid(wiring);
+                    let labels = rt.block_on(generate_plan(
+                        wiring.agent.clone(),
+                        &pid2,
+                        &cur_model,
+                        &task,
+                    ));
+                    if labels.is_empty() {
+                        st.lines.push(tui::ChatLine::Agent(String::from(
+                            "could not generate plan",
+                        )));
+                    } else {
+                        st.set_plan(labels);
+                        for (i, t) in st.plan.iter().enumerate() {
+                            st.lines.push(tui::ChatLine::Tool(format!(
+                                "{} [ ] {}",
+                                i + 1,
+                                t.label
+                            )));
+                        }
+                    }
+                    st.processing = false;
+                    return;
+                }
+
+                _ if t.starts_with("/todo") => {
+                    let arg = t.trim_start_matches("/todo").trim();
+                    if let Some(rest) = arg.strip_prefix("done ") {
+                        if let Ok(n) = rest.trim().parse::<usize>() {
+                            if let Some(item) = st.plan.get_mut(n.saturating_sub(1)) {
+                                item.done = true;
+                                st.lines
+                                    .push(tui::ChatLine::Tool(format!("done: {}", item.label)));
+                            } else {
+                                st.lines
+                                    .push(tui::ChatLine::Agent(String::from("no such item")));
+                            }
+                        } else {
+                            st.lines
+                                .push(tui::ChatLine::Agent(String::from("usage: /todo done <n>")));
+                        }
+                    } else if arg == "list" || arg.is_empty() {
+                        if st.plan.is_empty() {
+                            st.lines.push(tui::ChatLine::Tool(
+                                "(empty plan — use /plan <task>)".into(),
+                            ));
+                        } else {
+                            for (i, t) in st.plan.iter().enumerate() {
+                                let m = if t.done { "[✓]" } else { "[ ]" };
+                                st.lines.push(tui::ChatLine::Tool(format!(
+                                    "{} {} {}",
+                                    i + 1,
+                                    m,
+                                    t.label
+                                )));
+                            }
+                        }
+                    } else {
+                        st.lines.push(tui::ChatLine::Agent(String::from(
+                            "usage: /todo done <n> | /todo list",
+                        )));
+                    }
+                    return;
+                }
+
                 _ if t.starts_with("/export ") => {
                     let path = t.trim_start_matches("/export ").trim().to_string();
                     if path.is_empty() {
@@ -462,6 +535,15 @@ fn run_repl(wiring: &compose::Wiring, cli: &Cli) {
                         let m = st.status.model.clone();
                         st.status.total_cost = estimate_cost(&m, st.status.total_tokens);
                         *trx.borrow_mut() = new_hist;
+                        // Auto-tick plan items whose key words appeared.
+                        let combined: String = trx
+                            .borrow()
+                            .iter()
+                            .filter(|m| m.role == Role::Assistant)
+                            .map(|m| m.content.clone())
+                            .collect::<Vec<_>>()
+                            .join(" ");
+                        st.plan_auto_tick(&combined);
                         st.processing = false;
                     }
                     Err(e) => {
@@ -565,6 +647,40 @@ fn tool_preview(name: &str, args: &str) -> String {
         name.to_string()
     } else {
         format!("{name}: {}", &trimmed[..trimmed.len().min(80)])
+    }
+}
+
+/// Ask the model to break a task into a checklist; returns parsed labels.
+async fn generate_plan(
+    agent: Arc<dyn AgentPort>,
+    pid: &ProviderId,
+    model: &str,
+    task: &str,
+) -> Vec<String> {
+    let prompt = format!("Break this task into a concise checklist of 2-6 actionable subtasks. Return ONLY the subtasks, one per line, with no numbering, no markdown bullets, no intro or outro text.\n\nTask: {task}");
+    match agent
+        .run(
+            pid,
+            model,
+            "You are a task planner.",
+            &prompt,
+            &harxes_app::usecases::agent_loop::LoopLimits::default(),
+        )
+        .await
+    {
+        Ok(out) => out
+            .final_text
+            .lines()
+            .map(|l| {
+                l.trim()
+                    .trim_start_matches('-')
+                    .trim_start_matches("*")
+                    .trim()
+                    .to_string()
+            })
+            .filter(|l| !l.is_empty())
+            .collect(),
+        Err(_) => vec![],
     }
 }
 

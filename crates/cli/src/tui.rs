@@ -14,6 +14,22 @@ use syntect::highlighting::{Color as SynColor, FontStyle as SynFont};
 use syntect::highlighting::{Theme, ThemeSet};
 use syntect::parsing::{SyntaxReference, SyntaxSet};
 
+/// A checklist item the agent breaks its task down into.
+#[derive(Debug, Clone)]
+pub struct TaskItem {
+    pub label: String,
+    pub done: bool,
+}
+
+impl TaskItem {
+    pub fn new(label: impl Into<String>) -> Self {
+        Self {
+            label: label.into(),
+            done: false,
+        }
+    }
+}
+
 #[derive(Clone)]
 pub enum ChatLine {
     User(String),
@@ -84,6 +100,8 @@ pub struct AppState {
     pub active_tools: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
     /// Outstanding approval request awaiting a y/n answer (if any).
     pub approval_prompt: Option<String>,
+    /// Agent-proposed plan broken into subtasks with checkboxes.
+    pub plan: Vec<TaskItem>,
 }
 
 impl AppState {
@@ -114,10 +132,64 @@ impl AppState {
             completion_sel: 0,
             active_tools: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
             approval_prompt: None,
+            plan: vec![],
+        }
+    }
+
+    /// Replace the whole plan with parsed subtasks (labels only, undone).
+    pub fn set_plan(&mut self, labels: Vec<String>) {
+        self.plan = labels
+            .into_iter()
+            .filter(|l| !l.trim().is_empty())
+            .map(TaskItem::new)
+            .collect();
+    }
+
+    /// Mark the first undone item whose label contains `needle` as done.
+    #[allow(dead_code)]
+    pub fn mark_done(&mut self, needle: &str) -> bool {
+        let n = needle.trim().to_lowercase();
+        if let Some(t) = self
+            .plan
+            .iter_mut()
+            .find(|t| !t.done && t.label.to_lowercase().contains(&n))
+        {
+            t.done = true;
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Auto-tick undone items whose key words all appear in `text`.
+    pub fn plan_auto_tick(&mut self, text: &str) {
+        let t = text.to_lowercase();
+        const STOP: [&str; 12] = [
+            "the", "a", "an", "to", "of", "and", "in", "for", "on", "with", "this", "that",
+        ];
+        for item in self.plan.iter_mut() {
+            if item.done {
+                continue;
+            }
+            let words: Vec<String> = item
+                .label
+                .to_lowercase()
+                .split_whitespace()
+                .map(|x| x.trim_matches([',', '(', ')']).to_string())
+                .collect();
+            let sig: Vec<&String> = words
+                .iter()
+                .filter(|x| !STOP.contains(&x.as_str()) && x.len() > 2)
+                .collect();
+            if sig.is_empty() {
+                continue;
+            }
+            if sig.iter().all(|word| t.contains(word.as_str())) {
+                item.done = true;
+            }
         }
     }
 }
-/// Background tints for panes (opencode-style dark).
 const BG_STATUS: Color = Color::Indexed(234);
 const BG_INPUT: Color = Color::Indexed(236);
 
@@ -286,14 +358,34 @@ fn status_panel(frame: &mut Frame, state: &AppState, area: Rect) {
 }
 
 fn tasks_panel(frame: &mut Frame, state: &AppState, area: Rect) {
-    if !state.processing && state.status.tools_used.is_empty() && state.approval_prompt.is_none() {
+    let has_plan = !state.plan.is_empty();
+    if !state.processing
+        && state.status.tools_used.is_empty()
+        && state.approval_prompt.is_none()
+        && !has_plan
+    {
         return;
     }
     let mut text = ratatui::text::Text::default();
     text.push_line(Line::from(vec![Span::styled(
-        "  TASKS",
+        "  PLAN",
         Style::new().fg(Color::Cyan).bold(),
     )]));
+    if has_plan {
+        for t in &state.plan {
+            let box_mark = if t.done { "[✓]" } else { "[ ]" };
+            let col = if t.done { Color::Green } else { Color::White };
+            text.push_line(Line::from(vec![
+                Span::styled(format!("  {box_mark} "), Style::new().fg(col)),
+                Span::styled(t.label.clone(), Style::new().fg(col)),
+            ]));
+        }
+    } else {
+        text.push_line(Line::from(vec![Span::styled(
+            "  (no plan yet)",
+            Style::new().fg(Color::DarkGray),
+        )]));
+    }
     if let Some(p) = &state.approval_prompt {
         text.push_line(Line::raw(""));
         text.push_line(Line::from(vec![Span::styled(
@@ -314,7 +406,7 @@ fn tasks_panel(frame: &mut Frame, state: &AppState, area: Rect) {
         }
     };
     if !live.is_empty() {
-        for t in live.iter().take(6) {
+        for t in live.iter().take(4) {
             text.push_line(Line::from(vec![
                 Span::styled("  ⠿ ", Style::new().fg(Color::Yellow)),
                 Span::raw(t.to_string()),
@@ -325,18 +417,6 @@ fn tasks_panel(frame: &mut Frame, state: &AppState, area: Rect) {
             "  ⠿ working...",
             Style::new().fg(Color::Yellow),
         )]));
-    } else {
-        text.push_line(Line::from(vec![Span::styled(
-            "  idle",
-            Style::new().fg(Color::DarkGray),
-        )]));
-    }
-    text.push_line(Line::raw(""));
-    for t in &state.status.tools_used {
-        text.push_line(Line::from(vec![
-            Span::styled("  ✓ ", Style::new().fg(Color::Green)),
-            Span::raw(t.to_string()),
-        ]));
     }
     frame.render_widget(
         Paragraph::new(text).style(Style::default().bg(BG_STATUS).fg(Color::White)),
@@ -601,7 +681,7 @@ fn code_block_lines(lang: &str, code: &str) -> Vec<Line<'static>> {
     out
 }
 
-pub const SLASH_COMMANDS: [&str; 11] = [
+pub const SLASH_COMMANDS: [&str; 13] = [
     "/help",
     "/clear",
     "/cost",
@@ -611,6 +691,8 @@ pub const SLASH_COMMANDS: [&str; 11] = [
     "/sessions",
     "/resume ",
     "/remember ",
+    "/plan ",
+    "/todo",
     "/export ",
     "/exit",
 ];
@@ -691,8 +773,10 @@ mod tests {
             "Here is code:\n```rust\nfn main(){}\n```".into(),
         ));
         st.lines.push(ChatLine::Tool("Bash echo hi".into()));
-        st.input = "my input here".to_string();
-        st.processing = true;
+        	st.input="my input here".to_string();
+        	st.set_plan(vec!["write code".to_string(),"test it".to_string(),"commit".to_string()]);
+        	st.plan[0].done=true;
+        	st.processing=true;
         st.spinner = 2;
         st.typing_text = "streaming demo: This is revealed gradually.".to_string();
         st.typing_shown = 28;
