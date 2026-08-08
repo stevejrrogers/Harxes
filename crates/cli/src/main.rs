@@ -147,6 +147,7 @@ fn run_repl(wiring: &compose::Wiring, cli: &Cli) {
         ),
     };
     let mut state = tui::AppState::new(&wiring.provider_id, &model);
+    state.active_tools = wiring.active_tools.clone();
 
     use harxes_core_domain::domain::value_objects::Role;
     // Seed chat pane from any resumed history.

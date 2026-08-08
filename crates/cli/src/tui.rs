@@ -80,6 +80,8 @@ pub struct AppState {
     /// Slash command autocomplete menu state.
     pub completions: Vec<String>,
     pub completion_sel: usize,
+    /// Live view of tools currently executing (shared with the background task).
+    pub active_tools: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
 }
 
 impl AppState {
@@ -108,6 +110,7 @@ impl AppState {
             typing_shown: 0,
             completions: vec![],
             completion_sel: 0,
+            active_tools: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
         }
     }
 }
@@ -288,7 +291,21 @@ fn tasks_panel(frame: &mut Frame, state: &AppState, area: Rect) {
         "  TASKS",
         Style::new().fg(Color::Cyan).bold(),
     )]));
-    if state.processing {
+    // Live tools currently executing (from the shared observer buffer).
+    let live = {
+        match state.active_tools.lock() {
+            Ok(g) => g.clone(),
+            Err(_) => vec![],
+        }
+    };
+    if !live.is_empty() {
+        for t in live.iter().take(6) {
+            text.push_line(Line::from(vec![
+                Span::styled("  ⠿ ", Style::new().fg(Color::Yellow)),
+                Span::raw(t.to_string()),
+            ]));
+        }
+    } else if state.processing {
         text.push_line(Line::from(vec![Span::styled(
             "  ⠿ working...",
             Style::new().fg(Color::Yellow),

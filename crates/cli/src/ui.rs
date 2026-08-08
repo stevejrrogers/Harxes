@@ -2,7 +2,7 @@
 //! turn dividers and syntax highlighting for code blocks.
 
 use harxes_core_domain::ports::ToolObserver;
-use std::sync::OnceLock;
+use std::sync::{Arc, Mutex, OnceLock};
 
 /// ANSI color helper wrapping raw escape codes.
 pub struct C;
@@ -24,10 +24,16 @@ impl C {
     }
 }
 
-/// Prints live tool feedback lines as tools execute (e.g. "⏺ Bash(cmd)").
-pub struct ConsoleToolObserver;
-impl ToolObserver for ConsoleToolObserver {
+/// Prints live tool feedback lines as tools execute (e.g. "⏺ Bash(cmd)") and
+/// mirrors the currently-executing tools into a shared buffer the TUI renders.
+pub struct LiveToolObserver {
+    pub active: Arc<Mutex<Vec<String>>>,
+}
+impl ToolObserver for LiveToolObserver {
     fn on_tool_start(&self, name: &str, args_preview: &str) {
+        if let Ok(mut a) = self.active.lock() {
+            a.push(format!("{name} {args_preview}"));
+        }
         if std::env::var("HARXES_TUI").is_ok() {
             return;
         }

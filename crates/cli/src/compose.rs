@@ -117,6 +117,8 @@ pub struct Wiring {
     pub agent: Arc<dyn AgentPort>,
     pub provider_id: String,
     pub limits: LoopLimits,
+    /// Live view of tools currently executing (shared with the TUI).
+    pub active_tools: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
 }
 
 /// Assemble a fully-wired agent for the given (optional) provider id. The CLI
@@ -133,18 +135,24 @@ pub fn assemble(cli_provider: Option<&str>, cli_base_url: Option<&str>) -> Resul
     let llm = build_llm(&rp)?;
     let shell = Arc::new(TokioCommandShell::new(120));
     let fsys = Arc::new(HostFileSystem);
+    let active_tools: std::sync::Arc<std::sync::Mutex<Vec<String>>> =
+        std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let observer = crate::ui::LiveToolObserver {
+        active: active_tools.clone(),
+    };
     let agent: Arc<dyn AgentPort> = Arc::new(
         AgentLoop::with_session(
             AgentLoop::new(llm, shell, fsys),
             Arc::new(JsonSessionStore::new(default_config_dir())) as Arc<dyn SessionStorePort>,
             pid.clone(),
         )
-        .with_observer(Arc::new(crate::ui::ConsoleToolObserver)),
+        .with_observer(Arc::new(observer)),
     );
     Ok(Wiring {
         agent,
         provider_id: pid.clone(),
         limits: LoopLimits::default(),
+        active_tools,
     })
 }
 
