@@ -26,6 +26,7 @@ pub struct StatusInfo {
     pub model: String,
     pub total_tokens: u64,
     pub tools_used: Vec<String>,
+    pub total_cost: f64,
 }
 
 pub struct AppState {
@@ -52,6 +53,7 @@ impl AppState {
                 model: model.to_string(),
                 total_tokens: 0,
                 tools_used: vec![],
+                total_cost: 0.0,
             },
             history: vec![],
             hist_pos: None,
@@ -204,6 +206,10 @@ fn status_panel(frame: &mut Frame, state: &AppState, area: Rect) {
     text.push_line(Line::from(vec![
         Span::styled("tokens   ", Style::new().fg(Color::Yellow).bold()),
         Span::raw(state.status.total_tokens.to_string()),
+    ]));
+    text.push_line(Line::from(vec![
+        Span::styled("cost     ", Style::new().fg(Color::Green).bold()),
+        Span::raw(format!("${:.4}", state.status.total_cost)),
     ]));
     text.push_line(Line::from(vec![Span::raw("")]));
     text.push_line(Line::from(vec![Span::styled(

@@ -195,14 +195,31 @@ fn run_repl(wiring: &compose::Wiring, cli: &Cli) {
             // Slash commands handled here.
             match t.as_str() {
                 "/help" => {
-                    st.lines.push(tui::ChatLine::Agent(String ::from("/help      this help\n/clear     clear the screen\n/cost      total tokens used\n/model X   switch model\n/compact   summarize context\n/exit      quit")));
+                    st.lines.push(tui::ChatLine::Agent(String ::from("/help      this help\n/clear     clear the screen\n/cost      total tokens used\n/model X   switch model\n/compact   summarize context\n/sessions  list saved sessions\n/cost      tokens + estimated cost\n/exit      quit")));
                     return;
                 }
                 "/cost" => {
+                    let t = st.status.total_tokens;
+                    let model = st.status.model.clone();
+                    let cost = estimate_cost(&model, t);
                     st.lines.push(tui::ChatLine::Agent(format!(
-                        "total tokens used: {}",
-                        st.status.total_tokens
+                        "total tokens: {t}\nestimated cost: ${cost:.4}",
                     )));
+                    return;
+                }
+                "/sessions" => {
+                    let store = JsonSessionStore::new(config_dir.clone());
+                    let ids = store.list();
+                    if ids.is_empty() {
+                        st.lines
+                            .push(tui::ChatLine::Agent(String::from("no saved sessions")));
+                        return;
+                    }
+                    for id in &ids {
+                        let n = store.load(id).map(|r| r.transcript.len()).unwrap_or(0);
+                        st.lines
+                            .push(tui::ChatLine::Tool(format!("{id}  ({n} msgs)")));
+                    }
                     return;
                 }
                 _ if t.starts_with("/model ") => {
@@ -283,6 +300,11 @@ fn run_repl(wiring: &compose::Wiring, cli: &Cli) {
             }
             st.lines.push(tui::ChatLine::User(msg.clone()));
             st.processing = true;
+            if trx.borrow().len() > 60 {
+                st.lines.push(tui::ChatLine::Tool(
+                    "context is getting long — consider /compact".into(),
+                ));
+            }
             let cur_model = model_cell.borrow().clone();
             // Snapshot owned values for the background turn task.
             let agent = wiring.agent.clone();
@@ -316,6 +338,8 @@ fn run_repl(wiring: &compose::Wiring, cli: &Cli) {
                             st.lines.push(l);
                         }
                         st.status.total_tokens += tokens;
+                        let m = st.status.model.clone();
+                        st.status.total_cost = estimate_cost(&m, st.status.total_tokens);
                         *trx.borrow_mut() = new_hist;
                         st.processing = false;
                     }
@@ -391,4 +415,14 @@ async fn run_turn_owned(
         }
         Err(e) => Err(e.to_string()),
     }
+}
+/// Rough per-1k-token pricing estimate (USD) for common models.
+fn estimate_cost(model: &str, tokens: u64) -> f64 {
+    let per_1k = match model.to_lowercase().as_str() {
+        m if m.contains("claude-sonnet") => 0.003,
+        m if m.contains("claude-opus") => 0.015,
+        m if m.contains("gpt-4o") => 0.0025,
+        _ => 0.001,
+    };
+    (tokens as f64) / 1000.0 * per_1k
 }
