@@ -72,34 +72,8 @@ impl AppState {
     }
 }
 /// Background tints for panes (opencode-style dark).
-const BG_TITLE: Color = Color::Indexed(237);
 const BG_STATUS: Color = Color::Indexed(234);
 const BG_INPUT: Color = Color::Indexed(236);
-
-fn title_bar(frame: &mut Frame, state: &AppState, area: Rect) {
-    let (badge, col) = if state.processing {
-        ("THINKING", Color::Yellow)
-    } else {
-        ("READY", Color::Green)
-    };
-    let spin = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧"];
-    let indicator = if state.processing {
-        format!("{} {badge} ", spin[(state.spinner as usize) % spin.len()])
-    } else {
-        format!("● {badge} ")
-    };
-    let line = Line::from(vec![
-        Span::styled("  ✦ Harxes ", Style::new().fg(Color::Magenta).bold()),
-        Span::styled(indicator, Style::new().fg(col).bold()),
-        Span::styled(&state.status.provider, Style::new().fg(Color::Cyan)),
-        Span::raw(" / "),
-        Span::styled(&state.status.model, Style::new().fg(Color::Blue)),
-    ]);
-    frame.render_widget(
-        Paragraph::new(line).style(Style::default().bg(BG_TITLE).fg(Color::White)),
-        area,
-    );
-}
 
 fn agent_lines(text: &str) -> Vec<Line<'static>> {
     if !text.contains("```") {
@@ -267,6 +241,36 @@ fn status_panel(frame: &mut Frame, state: &AppState, area: Rect) {
     );
 }
 
+fn tasks_panel(frame: &mut Frame, state: &AppState, area: Rect) {
+    let mut text = ratatui::text::Text::default();
+    text.push_line(Line::from(vec![Span::styled(
+        "  TASKS",
+        Style::new().fg(Color::Cyan).bold(),
+    )]));
+    if state.processing {
+        text.push_line(Line::from(vec![Span::styled(
+            "  ⠿ working...",
+            Style::new().fg(Color::Yellow),
+        )]));
+    } else {
+        text.push_line(Line::from(vec![Span::styled(
+            "  idle",
+            Style::new().fg(Color::DarkGray),
+        )]));
+    }
+    text.push_line(Line::raw(""));
+    for t in &state.status.tools_used {
+        text.push_line(Line::from(vec![
+            Span::styled("  ✓ ", Style::new().fg(Color::Green)),
+            Span::raw(t.to_string()),
+        ]));
+    }
+    frame.render_widget(
+        Paragraph::new(text).style(Style::default().bg(BG_STATUS).fg(Color::White)),
+        area,
+    );
+}
+
 fn input_pane(frame: &mut Frame, state: &AppState, area: Rect) {
     let prompt_style = Style::new().fg(Color::Green).bold();
     let mut content = Vec::new();
@@ -290,35 +294,29 @@ fn input_pane(frame: &mut Frame, state: &AppState, area: Rect) {
 
 pub fn draw(frame: &mut Frame, state: &mut AppState) {
     let area = frame.area();
-    let outer = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Length(1),
-            Constraint::Min(1),
-            Constraint::Length(3),
-        ])
-        .split(area);
-    title_bar(frame, state, outer[0]);
-    let mid = Layout::default()
+    let cols = Layout::default()
         .direction(Direction::Horizontal)
-        .constraints([
-            Constraint::Percentage(50),
-            Constraint::Percentage(25),
-            Constraint::Percentage(25),
-        ])
-        .split(outer[1]);
-    chat_pane(frame, state, mid[0]);
-    status_panel(frame, state, mid[1]);
+        .constraints([Constraint::Percentage(68), Constraint::Percentage(32)])
+        .split(area);
+    let left = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Min(1), Constraint::Length(3)])
+        .split(cols[0]);
+    // Right column: status (top) + tasks (rest).
+    let r = cols[1];
+    let split = (r.height * 55 / 100).max(5);
+    let status_area = Rect::new(r.x, r.y, r.width, split);
+    let tasks_area = Rect::new(r.x, r.y + split, r.width, r.height.saturating_sub(split));
+    chat_pane(frame, state, left[0]);
+    input_pane(frame, state, left[1]);
+    status_panel(frame, state, status_area);
+    tasks_panel(frame, state, tasks_area);
     completion_menu(
         frame,
         &state.completions,
         state.completion_sel,
-        outer[2]
-            .y
-            .saturating_sub(state.completions.len().min(5) as u16 + 2),
+        left[0].y.saturating_add(left[0].height),
     );
-    input_pane(frame, state, outer[2]);
-    input_pane(frame, state, outer[2]);
 }
 
 pub fn run(
@@ -561,12 +559,15 @@ fn completion_menu(frame: &mut Frame, completions: &[String], selected: usize, a
     if completions.is_empty() {
         return;
     }
-    let shown = completions.len().min(5);
-    let w = 24u16;
-    let h = (shown as u16) + 2;
-    let x = 1u16;
-    let y = anchor_y;
-    let popup = Rect::new(x, y, w, h);
+    	let shown=completions.len().min(5);
+    	let w=24u16;
+    	let mut h=(shown as u16)+2;
+    	let x=1u16;
+    	// Keep the menu within the terminal height.
+    	let max_h=frame.area().height.saturating_sub(anchor_y).saturating_sub(1).max(3);
+    	if h>max_h{h=max_h;}
+    	let y=anchor_y.min(frame.area().height.saturating_sub(h));
+    	let popup=Rect::new(x,y,w,h);
     let mut text = ratatui::text::Text::default();
     for (i, c) in completions.iter().take(shown).enumerate() {
         let sel = i == selected % completions.len();
