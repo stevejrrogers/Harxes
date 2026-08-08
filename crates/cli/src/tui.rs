@@ -293,11 +293,19 @@ pub fn draw(frame: &mut Frame, state: &mut AppState) {
     title_bar(frame, state, outer[0]);
     let mid = Layout::default()
         .direction(Direction::Horizontal)
-        .constraints([Constraint::Percentage(78), Constraint::Percentage(22)])
+        .constraints([Constraint::Percentage(60), Constraint::Percentage(40)])
         .split(outer[1]);
     chat_pane(frame, state, mid[0]);
     status_panel(frame, state, mid[1]);
-    completion_menu(frame, state, outer[1]);
+    completion_menu(
+        frame,
+        &state.completions,
+        state.completion_sel,
+        outer[2]
+            .y
+            .saturating_sub(state.completions.len().min(5) as u16 + 2),
+    );
+    input_pane(frame, state, outer[2]);
     input_pane(frame, state, outer[2]);
 }
 
@@ -537,19 +545,19 @@ pub fn update_completions(state: &mut AppState) {
     state.completions = matches;
 }
 
-fn completion_menu(frame: &mut Frame, state: &AppState, area: Rect) {
-    if state.completions.is_empty() {
+fn completion_menu(frame: &mut Frame, completions: &[String], selected: usize, anchor_y: u16) {
+    if completions.is_empty() {
         return;
     }
-    let n = state.completions.len() as u16;
-    let w = area.width.min(24);
-    let h = n + 2;
-    let x = area.x.max(1);
-    let y = area.y;
-    let popup = Rect::new(x, y, w, h.min(area.height));
+    let shown = completions.len().min(5);
+    let w = 24u16;
+    let h = (shown as u16) + 2;
+    let x = 1u16;
+    let y = anchor_y;
+    let popup = Rect::new(x, y, w, h);
     let mut text = ratatui::text::Text::default();
-    for (i, c) in state.completions.iter().enumerate() {
-        let sel = i == state.completion_sel;
+    for (i, c) in completions.iter().take(shown).enumerate() {
+        let sel = i == selected % completions.len();
         let st = if sel {
             Style::new().fg(Color::Black).bg(Color::Cyan)
         } else {
