@@ -267,6 +267,12 @@ fn tasks_panel(frame: &mut Frame, state: &AppState, area: Rect) {
 
 fn input_pane(frame: &mut Frame, state: &AppState, area: Rect) {
     let prompt_style = Style::new().fg(Color::Green).bold();
+    // Blinking cursor: visible on even frames.
+    let cur = if state.spinner.is_multiple_of(2) {
+        Span::styled("▋", Style::new().fg(Color::Cyan))
+    } else {
+        Span::raw(" ")
+    };
     let mut content = Vec::new();
     content.push(Span::styled("❯ ", prompt_style));
     if state.input.is_empty() && !state.processing {
@@ -276,10 +282,8 @@ fn input_pane(frame: &mut Frame, state: &AppState, area: Rect) {
         ));
     } else {
         content.push(Span::raw(state.input.clone()));
-        if state.processing {
-            content.push(Span::styled(" ▋", Style::new().fg(Color::Cyan)));
-        }
     }
+    content.push(cur);
     frame.render_widget(
         Paragraph::new(Line::from(content)).style(Style::default().bg(BG_INPUT).fg(Color::White)),
         area,
@@ -325,9 +329,9 @@ pub fn run(
         Err(e) => return Err(format!("cannot init terminal: {e}").into()),
     };
     loop {
-        if state.processing {
-            state.spinner = state.spinner.wrapping_add(1);
-        }
+        // Advance the frame clock every loop tick so UI animations (blinking
+        // cursors) run even when idle.
+        state.spinner = state.spinner.wrapping_add(1);
         // Advance the typewriter reveal by a few chars per frame.
         if !state.typing_text.is_empty() && state.typing_shown < state.typing_text.len() {
             state.typing_shown = (state.typing_shown + 3).min(state.typing_text.len());
