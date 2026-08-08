@@ -10,9 +10,11 @@ mod tui;
 mod ui;
 
 use clap::Parser;
+use harxes_app::ports::agent::AgentPort;
 use harxes_core_domain::domain::value_objects::{Message, ProviderId};
-use harxes_core_domain::ports::SessionStorePort;
+use harxes_core_domain::ports::{SessionRecord, SessionStorePort};
 use harxes_infra_session::JsonSessionStore;
+use std::sync::Arc;
 
 /// Harxes — a Rust coding agent harness.
 #[derive(Debug, Parser)]
@@ -133,7 +135,6 @@ fn run_one_shot(wiring: &compose::Wiring, cli: &Cli, prompt: &str) {
 fn run_repl(wiring: &compose::Wiring, cli: &Cli) {
     let pid = make_pid(wiring);
     let model = resolve_model(wiring, cli);
-    let store = JsonSessionStore::new(compose::default_config_dir());
     let session_id = match &cli.resume {
         Some(id) => id.clone(),
         None => format!(
@@ -169,6 +170,11 @@ fn run_repl(wiring: &compose::Wiring, cli: &Cli) {
 
     use std::rc::Rc;
     let model_cell = Rc::new(RefCell::new(model));
+    // Cross-thread event channel: background turn task -> TUI poll_events.
+    let (tx, rx) =
+        std::sync::mpsc::channel::<Result<(Vec<tui::ChatLine>, u64, Vec<Message>), String>>();
+    let config_dir = compose::default_config_dir();
+    let handle = rt.handle().clone();
 
     state
         .lines
@@ -179,125 +185,148 @@ fn run_repl(wiring: &compose::Wiring, cli: &Cli) {
         )));
     }
 
-    let result = tui::run(&mut state, |st, msg| {
-        let t = msg.trim().to_string();
-        if t.is_empty() {
-            return;
-        }
-        // Slash commands handled here.
-        match t.as_str() {
-            "/help" => {
-                st.lines.push(tui::ChatLine::Agent(String ::from("/help      this help\n/clear     clear the screen\n/cost      total tokens used\n/model X   switch model\n/compact   summarize context\n/exit      quit")));
+    let result = tui::run(
+        &mut state,
+        |st, msg| {
+            let t = msg.trim().to_string();
+            if t.is_empty() {
                 return;
             }
-            "/cost" => {
-                st.lines.push(tui::ChatLine::Agent(format!(
-                    "total tokens used: {}",
-                    st.status.total_tokens
-                )));
-                return;
-            }
-            _ if t.starts_with("/model ") => {
-                let newm = t.trim_start_matches("/model ").trim().to_string();
-                if newm.is_empty() {
-                    st.lines
-                        .push(tui::ChatLine::Agent(String::from("usage: /model <name>")));
+            // Slash commands handled here.
+            match t.as_str() {
+                "/help" => {
+                    st.lines.push(tui::ChatLine::Agent(String ::from("/help      this help\n/clear     clear the screen\n/cost      total tokens used\n/model X   switch model\n/compact   summarize context\n/exit      quit")));
                     return;
                 }
-                *model_cell.borrow_mut() = newm.clone();
-                st.status.model = newm.clone();
-                st.lines
-                    .push(tui::ChatLine::Agent(format!("switched model to {newm}")));
-                return;
-            }
-            "/compact" => {
-                let mut tb = trx.borrow_mut();
-                if tb.is_empty() {
+                "/cost" => {
+                    st.lines.push(tui::ChatLine::Agent(format!(
+                        "total tokens used: {}",
+                        st.status.total_tokens
+                    )));
+                    return;
+                }
+                _ if t.starts_with("/model ") => {
+                    let newm = t.trim_start_matches("/model ").trim().to_string();
+                    if newm.is_empty() {
+                        st.lines
+                            .push(tui::ChatLine::Agent(String::from("usage: /model <name>")));
+                        return;
+                    }
+                    *model_cell.borrow_mut() = newm.clone();
+                    st.status.model = newm.clone();
+                    st.lines
+                        .push(tui::ChatLine::Agent(format!("switched model to {newm}")));
+                    return;
+                }
+                "/compact" => {
+                    let mut tb = trx.borrow_mut();
+                    if tb.is_empty() {
+                        drop(tb);
+                        st.lines
+                            .push(tui::ChatLine::Agent(String::from("nothing to compact")));
+                        return;
+                    }
+                    st.processing = true;
+                    let cur_model = model_cell.borrow().clone();
+                    let prompt = "Summarize this conversation into a concise recap that preserves all key facts, decisions, constraints and the current task. Return ONLY the summary text.";
+                    match rt.block_on(wiring.agent.continue_chat(
+                        &pid,
+                        &cur_model,
+                        &tb[..],
+                        prompt,
+                        &wiring.limits,
+                    )) {
+                        Ok(res) => {
+                            let summary = res.outcome.final_text.clone();
+                            *tb = vec![Message::new(
+                                Role::System,
+                                format!("Previous conversation summary: {summary}"),
+                            )];
+                            st.lines
+                                .push(tui::ChatLine::Tool("context compacted".into()));
+                            st.lines
+                                .push(tui::ChatLine::Agent(format!("summary: {summary}")));
+                        }
+                        Err(e) => st.lines.push(tui::ChatLine::Agent(format!("error: {e}"))),
+                    }
                     drop(tb);
-                    st.lines
-                        .push(tui::ChatLine::Agent(String::from("nothing to compact")));
+                    st.processing = false;
                     return;
                 }
-                st.processing = true;
-                let cur_model = model_cell.borrow().clone();
-                let prompt = "Summarize this conversation into a concise recap that preserves all key facts, decisions, constraints and the current task. Return ONLY the summary text.";
-                match rt.block_on(wiring.agent.continue_chat(
-                    &pid,
-                    &cur_model,
-                    &tb[..],
-                    prompt,
-                    &wiring.limits,
-                )) {
-                    Ok(res) => {
-                        let summary = res.outcome.final_text.clone();
-                        *tb = vec![Message::new(
-                            Role::System,
-                            format!("Previous conversation summary: {summary}"),
-                        )];
-                        st.lines
-                            .push(tui::ChatLine::Tool("context compacted".into()));
-                        st.lines
-                            .push(tui::ChatLine::Agent(format!("summary: {summary}")));
+                "/undo" => {
+                    let mut tb = trx.borrow_mut();
+                    let mut cut = None;
+                    for (i, m) in tb.iter().enumerate() {
+                        if m.role == Role::User {
+                            cut = Some(i);
+                        }
                     }
-                    Err(e) => st.lines.push(tui::ChatLine::Agent(format!("error: {e}"))),
-                }
-                drop(tb);
-                st.processing = false;
-                return;
-            }
-            "/undo" => {
-                let mut tb = trx.borrow_mut();
-                let mut cut = None;
-                for (i, m) in tb.iter().enumerate() {
-                    if m.role == Role::User {
-                        cut = Some(i);
+                    if let Some(c) = cut {
+                        tb.truncate(c);
                     }
+                    drop(tb);
+                    if let Some(pos) = st
+                        .lines
+                        .iter()
+                        .rposition(|l| matches!(l, tui::ChatLine::User(_)))
+                    {
+                        st.lines.truncate(pos);
+                    }
+                    st.lines.push(tui::ChatLine::Tool("undid last turn".into()));
+                    return;
                 }
-                if let Some(c) = cut {
-                    tb.truncate(c);
-                }
-                drop(tb);
-                if let Some(pos) = st
-                    .lines
-                    .iter()
-                    .rposition(|l| matches!(l, tui::ChatLine::User(_)))
-                {
-                    st.lines.truncate(pos);
-                }
-                st.lines.push(tui::ChatLine::Tool("undid last turn".into()));
-                return;
+                _ => {}
             }
-            _ => {}
-        }
 
-        if t.starts_with('/') {
-            return;
-        }
-        st.lines.push(tui::ChatLine::User(msg.clone()));
-        st.processing = true;
-        let cur_model = model_cell.borrow().clone();
-        let mut tb = trx.borrow_mut();
-        let out = rt.block_on(run_turn(
-            wiring,
-            &pid,
-            &cur_model,
-            &store,
-            &session_id,
-            &mut tb,
-            &t,
-        ));
-        drop(tb);
-        match out {
-            Ok((lines, tokens)) => {
-                for l in lines {
-                    st.lines.push(l);
-                }
-                st.status.total_tokens += tokens;
+            if t.starts_with('/') {
+                return;
             }
-            Err(e) => st.lines.push(tui::ChatLine::Agent(format!("error: {e}"))),
-        }
-        st.processing = false;
-    });
+            st.lines.push(tui::ChatLine::User(msg.clone()));
+            st.processing = true;
+            let cur_model = model_cell.borrow().clone();
+            // Snapshot owned values for the background turn task.
+            let agent = wiring.agent.clone();
+            let pid_str = wiring.provider_id.clone();
+            let cfg_dir = config_dir.clone();
+            let sid = session_id.clone();
+            let limits = wiring.limits.clone();
+            let history_snapshot = trx.borrow().clone();
+            let txc = tx.clone();
+            let handle2 = handle.clone();
+            handle2.spawn(async move {
+                let r = run_turn_owned(
+                    agent,
+                    pid_str,
+                    cur_model,
+                    cfg_dir,
+                    sid,
+                    history_snapshot,
+                    t,
+                    limits,
+                )
+                .await;
+                let _ = txc.send(r);
+            });
+        },
+        |st| {
+            while let Ok(ev) = rx.try_recv() {
+                match ev {
+                    Ok((lines, tokens, new_hist)) => {
+                        for l in lines {
+                            st.lines.push(l);
+                        }
+                        st.status.total_tokens += tokens;
+                        *trx.borrow_mut() = new_hist;
+                        st.processing = false;
+                    }
+                    Err(e) => {
+                        st.lines.push(tui::ChatLine::Agent(format!("error: {e}")));
+                        st.processing = false;
+                    }
+                }
+            }
+        },
+    );
     if let Err(e) = result {
         eprintln!("harxes tui error: {e}");
     }
@@ -319,32 +348,35 @@ fn load_history(cli: &Cli) -> Vec<Message> {
     }
 }
 
-async fn run_turn(
-    wiring: &compose::Wiring,
-    pid: &ProviderId,
-    model: &str,
-    store: &JsonSessionStore,
-    session_id: &str,
-    transcript: &mut Vec<Message>,
-    user_msg: &str,
-) -> Result<(Vec<tui::ChatLine>, u64), String> {
-    use harxes_core_domain::ports::SessionRecord;
-    match wiring
-        .agent
-        .continue_chat(pid, model, transcript, user_msg, &wiring.limits)
+/// Run one conversational turn from owned values (usable inside tokio::spawn).
+/// Returns display lines, token usage, and the updated transcript.
+#[allow(clippy::too_many_arguments)]
+async fn run_turn_owned(
+    agent: Arc<dyn AgentPort>,
+    pid_str: String,
+    model: String,
+    config_dir: String,
+    session_id: String,
+    history: Vec<Message>,
+    user_msg: String,
+    limits: harxes_app::usecases::agent_loop::LoopLimits,
+) -> Result<(Vec<tui::ChatLine>, u64, Vec<Message>), String> {
+    let pid = ProviderId::new(&pid_str).unwrap_or_else(|_| ProviderId::new("anthropic").unwrap());
+    let store = JsonSessionStore::new(config_dir);
+    match agent
+        .continue_chat(&pid, &model, &history, &user_msg, &limits)
         .await
     {
         Ok(res) => {
-            *transcript = res.transcript.clone();
-            let _ = store.save(&SessionRecord {
-                id: session_id.to_string(),
-                created_at: String::new(),
-                transcript: res.transcript.clone(),
-            });
             let tokens = res.outcome.usage_total_tokens;
-            // Surface tool calls performed this turn into the chat.
+            let new_hist = res.transcript.clone();
+            let _ = store.save(&SessionRecord {
+                id: session_id,
+                created_at: String::new(),
+                transcript: new_hist.clone(),
+            });
             let mut tool_names: Vec<String> = Vec::new();
-            for m in &res.transcript {
+            for m in &new_hist {
                 for tc in &m.tool_calls {
                     if !tool_names.contains(&tc.name) {
                         tool_names.push(tc.name.clone());
@@ -355,7 +387,7 @@ async fn run_turn(
             for tn in &tool_names {
                 lines.push(tui::ChatLine::Tool(format!("ran {tn}")));
             }
-            Ok((lines, tokens))
+            Ok((lines, tokens, new_hist))
         }
         Err(e) => Err(e.to_string()),
     }

@@ -37,6 +37,7 @@ pub struct AppState {
     pub history: Vec<String>,
     pub hist_pos: Option<usize>,
     pub auto_scroll: bool,
+    pub spinner: u32,
 }
 
 impl AppState {
@@ -55,6 +56,7 @@ impl AppState {
             history: vec![],
             hist_pos: None,
             auto_scroll: true,
+            spinner: 0,
         }
     }
 }
@@ -70,9 +72,15 @@ fn title_bar(frame: &mut Frame, state: &AppState, area: Rect) {
     } else {
         ("READY", Color::Green)
     };
+    let spin = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧"];
+    let indicator = if state.processing {
+        format!("{} {badge} ", spin[(state.spinner as usize) % spin.len()])
+    } else {
+        format!("● {badge} ")
+    };
     let line = Line::from(vec![
         Span::styled("  ✦ Harxes ", Style::new().fg(Color::Magenta).bold()),
-        Span::styled(format!("● {badge} "), Style::new().fg(col).bold()),
+        Span::styled(indicator, Style::new().fg(col).bold()),
         Span::styled(&state.status.provider, Style::new().fg(Color::Cyan)),
         Span::raw(" / "),
         Span::styled(&state.status.model, Style::new().fg(Color::Blue)),
@@ -252,14 +260,19 @@ pub fn draw(frame: &mut Frame, state: &mut AppState) {
 pub fn run(
     state: &mut AppState,
     mut on_command: impl FnMut(&mut AppState, String),
+    mut poll_events: impl FnMut(&mut AppState),
 ) -> Result<(), Box<dyn std::error::Error>> {
     let mut terminal = match ratatui::try_init() {
         Ok(t) => t,
         Err(e) => return Err(format!("cannot init terminal: {e}").into()),
     };
     loop {
+        if state.processing {
+            state.spinner = state.spinner.wrapping_add(1);
+        }
+        poll_events(state);
         terminal.draw(|f| draw(f, state))?;
-        if event::poll(Duration::from_millis(120))? {
+        if event::poll(Duration::from_millis(80))? {
             if let Event::Key(k) = event::read()? {
                 if k.modifiers
                     .contains(crossterm::event::KeyModifiers::CONTROL)
@@ -419,6 +432,8 @@ mod tests {
         ));
         st.lines.push(ChatLine::Tool("Bash echo hi".into()));
         st.input = "my input here".to_string();
+        st.processing = true;
+        st.spinner = 2;
         let backend = TestBackend::new(120, 24);
         let mut terminal = Terminal::new(backend).unwrap();
         terminal.draw(|f| draw(f, &mut st)).unwrap();
