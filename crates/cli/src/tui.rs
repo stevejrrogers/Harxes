@@ -204,8 +204,23 @@ fn chat_pane(frame: &mut Frame, state: &mut AppState, area: Rect) {
         )]));
         text.push_line(Line::from(vec![
             Span::raw(shown.to_string()),
-            Span::styled("▋", Style::new().fg(Color::Cyan)),
+            if state.spinner.is_multiple_of(2) {
+                Span::styled("▋", Style::new().fg(Color::Cyan))
+            } else {
+                Span::raw(" ")
+            },
         ]));
+    }
+    // Idle blinking cursor so the chat always feels live.
+    if state.typing_text.is_empty() && !state.processing {
+        if state.spinner.is_multiple_of(2) {
+            text.push_line(Line::from(vec![Span::styled(
+                "▋",
+                Style::new().fg(Color::Cyan),
+            )]));
+        } else {
+            text.push_line(Line::raw(""));
+        }
     }
     let para = Paragraph::new(text)
         .style(Style::default())
