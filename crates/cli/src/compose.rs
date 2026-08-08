@@ -119,6 +119,8 @@ pub struct Wiring {
     pub limits: LoopLimits,
     /// Live view of tools currently executing (shared with the TUI).
     pub active_tools: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
+    /// Interactive approval gate for dangerous operations.
+    pub approval_gate: Arc<ApprovalGate>,
 }
 
 /// Assemble a fully-wired agent for the given (optional) provider id. The CLI
@@ -140,12 +142,15 @@ pub fn assemble(cli_provider: Option<&str>, cli_base_url: Option<&str>) -> Resul
     let observer = crate::ui::LiveToolObserver {
         active: active_tools.clone(),
     };
+    let approval_gate = Arc::new(ApprovalGate::default());
+    let decider = Arc::new(GateDecider(approval_gate.clone()));
     let agent: Arc<dyn AgentPort> = Arc::new(
         AgentLoop::with_session(
             AgentLoop::new(llm, shell, fsys),
             Arc::new(JsonSessionStore::new(default_config_dir())) as Arc<dyn SessionStorePort>,
             pid.clone(),
         )
+        .with_decider(decider)
         .with_observer(Arc::new(observer)),
     );
     Ok(Wiring {
@@ -153,6 +158,7 @@ pub fn assemble(cli_provider: Option<&str>, cli_base_url: Option<&str>) -> Resul
         provider_id: pid.clone(),
         limits: LoopLimits::default(),
         active_tools,
+        approval_gate,
     })
 }
 
@@ -173,4 +179,111 @@ pub fn available_providers() -> Vec<String> {
         .into_iter()
         .map(|r| r.id().to_string())
         .collect()
+}
+
+/// Interactive approval gate: blocks an operation until the TUI user replies.
+#[derive(Debug, Default)]
+pub struct ApprovalGate {
+    inner: std::sync::Mutex<Vec<Request>>,
+    wake: std::sync::Condvar,
+}
+
+#[derive(Debug, Default)]
+struct Request {
+    description: String,
+    allowed: Option<bool>,
+}
+
+impl ApprovalGate {
+    /// Request approval for `description`; blocks the caller thread until a
+    /// decision is made (or auto-denies if the process is shutting down).
+    pub fn request(&self, description: &str) -> bool {
+        let mut q = self.inner.lock().unwrap();
+        q.push(Request {
+            description: description.to_string(),
+            allowed: None,
+        });
+        loop {
+            if let Some(r) = q.last_mut() {
+                if let Some(v) = r.allowed {
+                    return v;
+                }
+            }
+            q = self.wake.wait(q).unwrap();
+        }
+    }
+
+    /// True when there is an outstanding request awaiting a decision.
+    pub fn has_pending(&self) -> Option<String> {
+        let q = self.inner.lock().unwrap();
+        q.iter()
+            .rev()
+            .find(|r| r.allowed.is_none())
+            .map(|r| r.description.clone())
+    }
+
+    /// Resolve the most recent pending request with `allowed`.
+    pub fn resolve(&self, allowed: bool) -> bool {
+        let mut q = self.inner.lock().unwrap();
+        if let Some(r) = q.iter_mut().rev().find(|r| r.allowed.is_none()) {
+            r.allowed = Some(allowed);
+            self.wake.notify_all();
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Drop any pending requests (auto-deny so a blocked task can exit).
+    #[allow(dead_code)]
+    pub fn cancel_all(&self) {
+        let mut q = self.inner.lock().unwrap();
+        for r in q.iter_mut() {
+            if r.allowed.is_none() {
+                r.allowed = Some(false);
+            }
+        }
+        self.wake.notify_all();
+    }
+}
+
+/// Bridges [`ApprovalGate`] to the application's [`PermissionDecider`] port.
+pub struct GateDecider(pub Arc<ApprovalGate>);
+
+impl harxes_core_domain::ports::PermissionDecider for GateDecider {
+    fn decide_write(&self, path: &str) -> bool {
+        self.0.request(&format!("write {path}"))
+    }
+    fn decide_bash(&self, command: &str) -> bool {
+        self.0.request(&format!("run bash \"{command}\""))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use harxes_core_domain::ports::PermissionDecider;
+
+    #[test]
+    fn approval_gate_blocks_then_resolves() {
+        let gate = Arc::new(ApprovalGate::default());
+        let g2 = gate.clone();
+        let worker = std::thread::spawn(move || g2.request("write /tmp/x"));
+        // Give the worker a moment to block on the request.
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        assert!(gate.has_pending().is_some());
+        assert!(gate.resolve(true));
+        assert!(worker.join().unwrap());
+    }
+
+    #[test]
+    fn decider_bridges_to_gate() {
+        let gate = Arc::new(ApprovalGate::default());
+        let decider = GateDecider(gate.clone());
+        let g2 = gate.clone();
+        let worker = std::thread::spawn(move || decider.decide_bash("rm -rf /"));
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        g2.resolve(false);
+        assert!(!worker.join().unwrap());
+    }
 }

@@ -3,6 +3,7 @@
 mod config_store;
 mod file_system;
 mod llm;
+mod permission_decider;
 mod secrets_vault;
 mod session;
 mod shell;
@@ -13,6 +14,7 @@ mod tool_observer;
 pub use config_store::{ConfigStoreError, ConfigStorePort, HarxesConfig, ProviderConfig};
 pub use file_system::{FileSystemPort, FsError};
 pub use llm::{AgentResponse, LlmError, LlmPort};
+pub use permission_decider::PermissionDecider;
 pub use secrets_vault::{keys, SecretsVaultPort};
 pub use session::{SessionRecord, SessionStoreError, SessionStorePort};
 pub use shell::{CommandOutput, ShellError, ShellExitStatus, ShellPort};

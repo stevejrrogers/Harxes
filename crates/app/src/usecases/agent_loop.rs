@@ -42,6 +42,7 @@ pub struct AgentLoop {
     shell: Arc<dyn harxes_core_domain::ports::ShellPort>,
     fsys: Arc<dyn FileSystemPort>,
     policy: Option<harxes_core_domain::domain::value_objects::PermissionPolicy>,
+    decider: Option<Arc<dyn harxes_core_domain::ports::PermissionDecider>>,
     session: Option<(Arc<dyn harxes_core_domain::ports::SessionStorePort>, String)>,
     observer: Option<Arc<dyn harxes_core_domain::ports::ToolObserver>>,
 }
@@ -57,6 +58,7 @@ impl AgentLoop {
             shell,
             fsys,
             policy: None,
+            decider: None,
             session: None,
             observer: None,
         }
@@ -68,6 +70,15 @@ impl AgentLoop {
         p: harxes_core_domain::domain::value_objects::PermissionPolicy,
     ) -> Self {
         self.policy = Some(p);
+        self
+    }
+
+    /// Attach an interactive decider for operations not covered by the policy.
+    pub fn with_decider(
+        mut self,
+        d: Arc<dyn harxes_core_domain::ports::PermissionDecider>,
+    ) -> Self {
+        self.decider = Some(d);
         self
     }
 
@@ -136,6 +147,13 @@ impl AgentLoop {
 
     async fn run_bash(&self, cmd: &str) -> String {
         use harxes_core_domain::ports::ShellExitStatus;
+        if Self::is_dangerous(cmd) {
+            if let Some(d) = &self.decider {
+                if !d.decide_bash(cmd) {
+                    return format!("permission denied: '{cmd}' was not approved");
+                }
+            }
+        }
         match self.shell.run_command(".", cmd).await {
             Ok(o) => {
                 let code = match o.exit_status {
@@ -153,6 +171,21 @@ impl AgentLoop {
         }
     }
 
+    /// Heuristic: commands that can irreversibly destroy state.
+    fn is_dangerous(cmd: &str) -> bool {
+        let c = cmd.trim_start();
+        const DANGER_PREFIXES: [&str; 7] = [
+            "rm -rf",
+            "rm -fr",
+            "rm -r --no-preserve-root",
+            "sudo ",
+            "mkfs.",
+            ":(){ :|:& };:",
+            "dd if=",
+        ];
+        DANGER_PREFIXES.iter().any(|p| c.starts_with(p))
+    }
+
     async fn read_file(&self, path: &str) -> String {
         match self.fsys.read(path.trim()).await {
             Ok(c) => c,
@@ -165,8 +198,16 @@ impl AgentLoop {
             return "write error: empty path".to_string();
         }
         use harxes_core_domain::domain::value_objects::FsOp;
-        if let Some(policy) = &self.policy {
-            if !policy.permits(FsOp::Write, path) {
+        let allowed = match &self.policy {
+            Some(p) => p.permits(FsOp::Write, path),
+            None => true,
+        };
+        if !allowed {
+            if let Some(d) = &self.decider {
+                if !d.decide_write(path) {
+                    return format!("permission denied: writing {} was not approved", path);
+                }
+            } else {
                 return format!(
                     "permission required: writing {} is not in the allow list; no action taken",
                     path

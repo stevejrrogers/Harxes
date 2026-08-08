@@ -198,6 +198,22 @@ fn run_repl(wiring: &compose::Wiring, cli: &Cli) {
             if t.is_empty() {
                 return;
             }
+            // While an approval is pending, intercept y/n replies.
+            if st.approval_prompt.is_some() {
+                match t.to_lowercase().as_str() {
+                    "y" | "yes" | "allow" => {
+                        wiring.approval_gate.resolve(true);
+                        st.lines.push(tui::ChatLine::Tool("allowed".into()));
+                        return;
+                    }
+                    "n" | "no" | "deny" => {
+                        wiring.approval_gate.resolve(false);
+                        st.lines.push(tui::ChatLine::Tool("denied".into()));
+                        return;
+                    }
+                    _ => {}
+                }
+            }
             // Slash commands handled here.
             match t.as_str() {
                 "/help" => {
@@ -425,6 +441,8 @@ fn run_repl(wiring: &compose::Wiring, cli: &Cli) {
             });
         },
         |st| {
+            // Surface any outstanding approval request for the user to answer.
+            st.approval_prompt = wiring.approval_gate.has_pending();
             while let Ok(ev) = rx.try_recv() {
                 match ev {
                     Ok((lines, in_tok, out_tok, new_hist)) => {

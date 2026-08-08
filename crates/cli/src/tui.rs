@@ -82,6 +82,8 @@ pub struct AppState {
     pub completion_sel: usize,
     /// Live view of tools currently executing (shared with the background task).
     pub active_tools: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
+    /// Outstanding approval request awaiting a y/n answer (if any).
+    pub approval_prompt: Option<String>,
 }
 
 impl AppState {
@@ -111,6 +113,7 @@ impl AppState {
             completions: vec![],
             completion_sel: 0,
             active_tools: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
+            approval_prompt: None,
         }
     }
 }
@@ -283,7 +286,7 @@ fn status_panel(frame: &mut Frame, state: &AppState, area: Rect) {
 }
 
 fn tasks_panel(frame: &mut Frame, state: &AppState, area: Rect) {
-    if !state.processing && state.status.tools_used.is_empty() {
+    if !state.processing && state.status.tools_used.is_empty() && state.approval_prompt.is_none() {
         return;
     }
     let mut text = ratatui::text::Text::default();
@@ -291,7 +294,19 @@ fn tasks_panel(frame: &mut Frame, state: &AppState, area: Rect) {
         "  TASKS",
         Style::new().fg(Color::Cyan).bold(),
     )]));
-    // Live tools currently executing (from the shared observer buffer).
+    if let Some(p) = &state.approval_prompt {
+        text.push_line(Line::raw(""));
+        text.push_line(Line::from(vec![Span::styled(
+            "  ⚠ allow? y/n",
+            Style::new().fg(Color::Red).add_modifier(Modifier::BOLD),
+        )]));
+        for ln in p.split('\n') {
+            text.push_line(Line::from(vec![
+                Span::styled("    ", Style::new().fg(Color::DarkGray)),
+                Span::raw(ln.to_string()),
+            ]));
+        }
+    }
     let live = {
         match state.active_tools.lock() {
             Ok(g) => g.clone(),
