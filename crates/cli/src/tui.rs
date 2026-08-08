@@ -773,10 +773,14 @@ mod tests {
             "Here is code:\n```rust\nfn main(){}\n```".into(),
         ));
         st.lines.push(ChatLine::Tool("Bash echo hi".into()));
-        	st.input="my input here".to_string();
-        	st.set_plan(vec!["write code".to_string(),"test it".to_string(),"commit".to_string()]);
-        	st.plan[0].done=true;
-        	st.processing=true;
+        st.input = "my input here".to_string();
+        st.set_plan(vec![
+            "write code".to_string(),
+            "test it".to_string(),
+            "commit".to_string(),
+        ]);
+        st.plan[0].done = true;
+        st.processing = true;
         st.spinner = 2;
         st.typing_text = "streaming demo: This is revealed gradually.".to_string();
         st.typing_shown = 28;

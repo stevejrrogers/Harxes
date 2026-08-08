@@ -481,6 +481,20 @@ fn run_repl(wiring: &compose::Wiring, cli: &Cli) {
             }
             st.lines.push(tui::ChatLine::User(msg.clone()));
             st.processing = true;
+            // Auto-propose a plan for a new task (only when none is active yet).
+            if st.plan.is_empty() && t.split_whitespace().count() > 2 {
+                let cur_model2 = model_cell.borrow().clone();
+                let pid3 = make_pid(wiring);
+                let labels =
+                    rt.block_on(generate_plan(wiring.agent.clone(), &pid3, &cur_model2, &t));
+                if !labels.is_empty() {
+                    st.set_plan(labels);
+                    for (i, it) in st.plan.iter().enumerate() {
+                        st.lines
+                            .push(tui::ChatLine::Tool(format!("{} [ ] {}", i + 1, it.label)));
+                    }
+                }
+            }
             if trx.borrow().len() > 60 {
                 st.lines.push(tui::ChatLine::Tool(
                     "context is getting long — consider /compact".into(),
