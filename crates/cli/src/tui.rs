@@ -25,6 +25,8 @@ pub struct StatusInfo {
     pub provider: String,
     pub model: String,
     pub total_tokens: u64,
+    pub total_input_tokens: u64,
+    pub total_output_tokens: u64,
     pub tools_used: Vec<String>,
     pub total_cost: f64,
     pub cwd: String,
@@ -91,6 +93,8 @@ impl AppState {
                 provider: provider.to_string(),
                 model: model.to_string(),
                 total_tokens: 0,
+                total_input_tokens: 0,
+                total_output_tokens: 0,
                 tools_used: vec![],
                 total_cost: 0.0,
                 cwd: current_dir_label(),
@@ -257,6 +261,13 @@ fn status_panel(frame: &mut Frame, state: &AppState, area: Rect) {
     text.push_line(Line::from(vec![
         Span::styled("tokens   ", Style::new().fg(Color::Yellow).bold()),
         Span::raw(state.status.total_tokens.to_string()),
+    ]));
+    text.push_line(Line::from(vec![
+        Span::styled("  in/out  ", Style::new().fg(Color::DarkGray)),
+        Span::raw(format!(
+            "{}/{}",
+            state.status.total_input_tokens, state.status.total_output_tokens
+        )),
     ]));
     text.push_line(Line::from(vec![
         Span::styled("cost     ", Style::new().fg(Color::Green).bold()),

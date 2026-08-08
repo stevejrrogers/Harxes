@@ -173,7 +173,7 @@ fn run_repl(wiring: &compose::Wiring, cli: &Cli) {
     let model_cell = Rc::new(RefCell::new(model));
     // Cross-thread event channel: background turn task -> TUI poll_events.
     let (tx, rx) =
-        std::sync::mpsc::channel::<Result<(Vec<tui::ChatLine>, u64, Vec<Message>), String>>();
+        std::sync::mpsc::channel::<Result<(Vec<tui::ChatLine>, u64, u64, Vec<Message>), String>>();
     let config_dir = compose::default_config_dir();
     // Project-scoped agent context: agents write/re-read state under `<cwd>/.harxes`.
     let ctx_store = ContextStore::new(std::path::PathBuf::from(".harxes"));
@@ -203,10 +203,12 @@ fn run_repl(wiring: &compose::Wiring, cli: &Cli) {
                 }
                 "/cost" => {
                     let t = st.status.total_tokens;
+                    let ti = st.status.total_input_tokens;
+                    let to = st.status.total_output_tokens;
                     let model = st.status.model.clone();
                     let cost = estimate_cost(&model, t);
                     st.lines.push(tui::ChatLine::Agent(format!(
-                        "total tokens: {t}\nestimated cost: ${cost:.4}",
+                        "tokens: {t} (in {ti} / out {to})\nestimated cost: ${cost:.4}",
                     )));
                     return;
                 }
@@ -359,7 +361,7 @@ fn run_repl(wiring: &compose::Wiring, cli: &Cli) {
         |st| {
             while let Ok(ev) = rx.try_recv() {
                 match ev {
-                    Ok((lines, tokens, new_hist)) => {
+                    Ok((lines, in_tok, out_tok, new_hist)) => {
                         for l in lines {
                             match l {
                                 tui::ChatLine::Agent(txt) => {
@@ -369,7 +371,10 @@ fn run_repl(wiring: &compose::Wiring, cli: &Cli) {
                                 other => st.lines.push(other),
                             }
                         }
-                        st.status.total_tokens += tokens;
+                        let tok = in_tok.saturating_add(out_tok);
+                        st.status.total_input_tokens += in_tok;
+                        st.status.total_output_tokens += out_tok;
+                        st.status.total_tokens += tok;
                         let m = st.status.model.clone();
                         st.status.total_cost = estimate_cost(&m, st.status.total_tokens);
                         *trx.borrow_mut() = new_hist;
@@ -417,7 +422,7 @@ async fn run_turn_owned(
     history: Vec<Message>,
     user_msg: String,
     limits: harxes_app::usecases::agent_loop::LoopLimits,
-) -> Result<(Vec<tui::ChatLine>, u64, Vec<Message>), String> {
+) -> Result<(Vec<tui::ChatLine>, u64, u64, Vec<Message>), String> {
     let pid = ProviderId::new(&pid_str).unwrap_or_else(|_| ProviderId::new("anthropic").unwrap());
     let store = JsonSessionStore::new(config_dir);
     // Agent started working: ensure its session context directory exists.
@@ -433,7 +438,8 @@ async fn run_turn_owned(
         .await
     {
         Ok(res) => {
-            let tokens = res.outcome.usage_total_tokens;
+            let in_tok = res.outcome.input_tokens;
+            let out_tok = res.outcome.output_tokens;
             let new_hist = res.transcript.clone();
             let _ = store.save(&SessionRecord {
                 id: session_id,
@@ -452,7 +458,7 @@ async fn run_turn_owned(
             for tn in &tool_names {
                 lines.push(tui::ChatLine::Tool(format!("ran {tn}")));
             }
-            Ok((lines, tokens, new_hist))
+            Ok((lines, in_tok, out_tok, new_hist))
         }
         Err(e) => Err(e.to_string()),
     }

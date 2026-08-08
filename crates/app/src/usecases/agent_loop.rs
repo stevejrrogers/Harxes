@@ -31,6 +31,8 @@ pub struct LoopOutcome {
     pub final_text: String,
     pub iterations: usize,
     pub usage_total_tokens: u64,
+    pub input_tokens: u64,
+    pub output_tokens: u64,
     pub truncated_by_guardrail: bool,
 }
 
@@ -190,6 +192,8 @@ impl AgentLoop {
         let tools = Self::tool_specs();
         let mut iterations = 0usize;
         let mut total_tokens = 0u64;
+        let mut total_input = 0u64;
+        let mut total_output = 0u64;
         let mut truncated = false;
 
         loop {
@@ -210,6 +214,8 @@ impl AgentLoop {
                 .generate(provider_id, model_id, &transcript, &tools, None)
                 .await?;
             total_tokens += resp.usage.total_tokens;
+            total_input += resp.usage.input_tokens;
+            total_output += resp.usage.output_tokens;
             if total_tokens > limits.max_total_tokens {
                 truncated = true;
                 break;
@@ -222,6 +228,8 @@ impl AgentLoop {
                     final_text: resp.content.clone(),
                     iterations,
                     usage_total_tokens: total_tokens,
+                    input_tokens: total_input,
+                    output_tokens: total_output,
                     truncated_by_guardrail: truncated,
                 };
                 return Ok((out, transcript));
@@ -241,6 +249,8 @@ impl AgentLoop {
                 final_text: "[stopped by guardrail]".to_string(),
                 iterations,
                 usage_total_tokens: total_tokens,
+                input_tokens: total_input,
+                output_tokens: total_output,
                 truncated_by_guardrail: truncated,
             },
             transcript,
