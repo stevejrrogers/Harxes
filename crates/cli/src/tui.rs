@@ -41,6 +41,9 @@ pub struct AppState {
     pub spinner: u32,
     pub typing_text: String,
     pub typing_shown: usize,
+    /// Slash command autocomplete menu state.
+    pub completions: Vec<String>,
+    pub completion_sel: usize,
 }
 
 impl AppState {
@@ -63,12 +66,13 @@ impl AppState {
             spinner: 0,
             typing_text: String::new(),
             typing_shown: 0,
+            completions: vec![],
+            completion_sel: 0,
         }
     }
 }
 /// Background tints for panes (opencode-style dark).
 const BG_TITLE: Color = Color::Indexed(237);
-const BG_CHAT: Color = Color::Indexed(235);
 const BG_STATUS: Color = Color::Indexed(234);
 const BG_INPUT: Color = Color::Indexed(236);
 
@@ -162,39 +166,49 @@ fn chat_pane(frame: &mut Frame, state: &mut AppState, area: Rect) {
     for line in &state.lines {
         match line {
             ChatLine::User(t) => {
-                text.push_line(Line::from(vec![
-                    Span::styled("❯ ", Style::new().fg(Color::Green).bold()),
-                    Span::raw(t.to_string()),
-                ]));
+                // user bubble, right-ish with green "You" label
+                text.push_line(Line::from(vec![Span::styled(
+                    "  You",
+                    Style::new().fg(Color::Green).bold(),
+                )]));
+                text.push_line(Line::from(vec![Span::styled(
+                    t.to_string(),
+                    Style::new().fg(Color::Rgb(196, 210, 230)),
+                )]));
+                text.push_line(Line::raw(""));
             }
             ChatLine::Agent(t) => {
                 text.push_line(Line::from(vec![Span::styled(
-                    "✦ ",
+                    "  AI  ✦",
                     Style::new().fg(Color::Magenta).bold(),
                 )]));
                 for l in agent_lines(t) {
                     text.push_line(l);
                 }
-                text.push_line(Line::from(vec![Span::raw("")]));
+                text.push_line(Line::raw(""));
             }
             ChatLine::Tool(t) => {
                 text.push_line(Line::from(vec![
-                    Span::styled("⏺ ", Style::new().fg(Color::Cyan)),
+                    Span::styled("  ⏺ ", Style::new().fg(Color::DarkGray)),
                     Span::raw(t.to_string()),
                 ]));
             }
         }
-        // Typewriter reveal of the most recent agent response.
-        if !state.typing_text.is_empty() {
-            let shown = &state.typing_text[..state.typing_shown.min(state.typing_text.len())];
-            text.push_line(Line::from(vec![
-                Span::styled("✦ ", Style::new().fg(Color::Magenta).bold()),
-                Span::raw(shown.to_string()),
-            ]));
-        }
+    }
+    // typewriter reveal OUTSIDE the per-line loop, once at the end.
+    if !state.typing_text.is_empty() {
+        let shown = &state.typing_text[..state.typing_shown.min(state.typing_text.len())];
+        text.push_line(Line::from(vec![Span::styled(
+            "  AI  ✦",
+            Style::new().fg(Color::Magenta).bold(),
+        )]));
+        text.push_line(Line::from(vec![
+            Span::raw(shown.to_string()),
+            Span::styled("▋", Style::new().fg(Color::Cyan)),
+        ]));
     }
     let para = Paragraph::new(text)
-        .style(Style::default().bg(BG_CHAT).fg(Color::White))
+        .style(Style::default())
         .wrap(ratatui::widgets::Wrap { trim: true })
         .scroll((state.scroll, 0));
     frame.render_widget(para, area);
@@ -239,17 +253,28 @@ fn status_panel(frame: &mut Frame, state: &AppState, area: Rect) {
 }
 
 fn input_pane(frame: &mut Frame, state: &AppState, area: Rect) {
-    let content = Line::from(vec![
-        Span::styled("❯ ", Style::new().fg(Color::Green).bold()),
-        Span::raw(state.input.clone()),
-    ]);
+    let prompt_style = Style::new().fg(Color::Green).bold();
+    let mut content = Vec::new();
+    content.push(Span::styled("❯ ", prompt_style));
+    if state.input.is_empty() && !state.processing {
+        content.push(Span::styled(
+            "Type a message...",
+            Style::new().fg(Color::DarkGray),
+        ));
+    } else {
+        content.push(Span::raw(state.input.clone()));
+        if state.processing {
+            content.push(Span::styled(" ▋", Style::new().fg(Color::Cyan)));
+        }
+    }
     frame.render_widget(
-        Paragraph::new(content)
+        Paragraph::new(Line::from(content))
             .style(Style::default().bg(BG_INPUT).fg(Color::White))
             .block(
                 Block::default()
-                    .borders(Borders::TOP)
-                    .border_style(Style::new().fg(Color::DarkGray)),
+                    .borders(Borders::LEFT | Borders::TOP)
+                    .border_type(ratatui::widgets::BorderType::Thick)
+                    .border_style(Style::new().fg(Color::Green)),
             ),
         area,
     );
@@ -272,6 +297,7 @@ pub fn draw(frame: &mut Frame, state: &mut AppState) {
         .split(outer[1]);
     chat_pane(frame, state, mid[0]);
     status_panel(frame, state, mid[1]);
+    completion_menu(frame, state, outer[1]);
     input_pane(frame, state, outer[2]);
 }
 
@@ -313,11 +339,22 @@ pub fn run(
                     continue;
                 }
                 match k.code {
-                    KeyCode::Char(c) => state.input.push(c),
+                    KeyCode::Char(c) => {
+                        state.input.push(c);
+                        update_completions(state);
+                    }
                     KeyCode::Backspace => {
                         state.input.pop();
+                        update_completions(state);
                     }
                     KeyCode::Enter => {
+                        if !state.completions.is_empty() {
+                            if let Some(c) = state.completions.get(state.completion_sel) {
+                                state.input = c.clone();
+                            }
+                            state.completions.clear();
+                            continue;
+                        }
                         let msg = std::mem::take(&mut state.input);
                         let t = msg.trim();
                         if t == "/exit" {
@@ -344,8 +381,17 @@ pub fn run(
                         }
                         state.scroll = 0;
                     }
-                    // Input history navigation (Up/Down)
+                    // Up/Down: navigate completions when open, else input history.
                     KeyCode::Up => {
+                        if !state.completions.is_empty() {
+                            let len = state.completions.len();
+                            state.completion_sel = if state.completion_sel == 0 {
+                                len - 1
+                            } else {
+                                state.completion_sel - 1
+                            };
+                            continue;
+                        }
                         let n = state.history.len();
                         if n == 0 {
                             continue;
@@ -360,6 +406,11 @@ pub fn run(
                         state.hist_pos = Some(pos);
                     }
                     KeyCode::Down => {
+                        if !state.completions.is_empty() {
+                            let len = state.completions.len();
+                            state.completion_sel = (state.completion_sel + 1) % len;
+                            continue;
+                        }
                         if let Some(p) = state.hist_pos {
                             if p == 0 {
                                 state.input.clear();
@@ -382,6 +433,13 @@ pub fn run(
                     KeyCode::PageUp => {
                         state.auto_scroll = false;
                         state.scroll += 5;
+                    }
+                    KeyCode::Esc => {
+                        if !state.completions.is_empty() {
+                            state.completions.clear();
+                        } else {
+                            break;
+                        }
                     }
                     _ => {}
                 }
@@ -446,6 +504,71 @@ fn code_block_lines(lang: &str, code: &str) -> Vec<Line<'static>> {
     out
 }
 
+pub const SLASH_COMMANDS: [&str; 8] = [
+    "/help",
+    "/clear",
+    "/cost",
+    "/model ",
+    "/compact",
+    "/undo",
+    "/sessions",
+    "/exit",
+];
+
+/// Recompute the autocomplete list based on the current input.
+pub fn update_completions(state: &mut AppState) {
+    if !state.input.starts_with("/") || state.input.contains(' ') {
+        state.completions.clear();
+        state.completion_sel = 0;
+        return;
+    }
+    let prefix = &state.input;
+    let mut matches: Vec<String> = SLASH_COMMANDS
+        .iter()
+        .filter(|c| c.starts_with(prefix))
+        .map(|c| c.to_string())
+        .collect();
+    if matches.is_empty() {
+        matches.push(prefix.to_string());
+    }
+    if state.completion_sel >= matches.len() {
+        state.completion_sel = 0;
+    }
+    state.completions = matches;
+}
+
+fn completion_menu(frame: &mut Frame, state: &AppState, area: Rect) {
+    if state.completions.is_empty() {
+        return;
+    }
+    let n = state.completions.len() as u16;
+    let w = area.width.min(24);
+    let h = n + 2;
+    let x = area.x.max(1);
+    let y = area.y;
+    let popup = Rect::new(x, y, w, h.min(area.height));
+    let mut text = ratatui::text::Text::default();
+    for (i, c) in state.completions.iter().enumerate() {
+        let sel = i == state.completion_sel;
+        let st = if sel {
+            Style::new().fg(Color::Black).bg(Color::Cyan)
+        } else {
+            Style::new().fg(Color::White)
+        };
+        text.push_line(Line::from(vec![Span::styled(c.clone(), st)]));
+    }
+    frame.render_widget(
+        Paragraph::new(text)
+            .block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .border_style(Style::new().fg(Color::Cyan)),
+            )
+            .bg(Color::Indexed(236)),
+        popup,
+    );
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -459,10 +582,12 @@ mod tests {
         ));
         st.lines.push(ChatLine::Tool("Bash echo hi".into()));
         st.input = "my input here".to_string();
-        	st.processing=true;
-        	st.spinner=2;
-        	st.typing_text="streaming demo: This is revealed gradually.".to_string();
-        	st.typing_shown=28;
+        st.processing = true;
+        st.spinner = 2;
+        st.typing_text = "streaming demo: This is revealed gradually.".to_string();
+        st.typing_shown = 28;
+        st.input = "/c".to_string();
+        update_completions(&mut st);
         let backend = TestBackend::new(120, 24);
         let mut terminal = Terminal::new(backend).unwrap();
         terminal.draw(|f| draw(f, &mut st)).unwrap();
