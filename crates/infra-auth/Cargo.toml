@@ -1,0 +1,7 @@
+[package]
+name = "harxes-infra-auth"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+harxes-core-domain = { path = "../core-domain" }

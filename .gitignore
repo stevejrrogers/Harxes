@@ -1,0 +1,18 @@
+/target
+**/*.rs.bk
+.DS_Store
+.env
+*.env
+
+# editor / tooling
+.claude/
+.cursor/
+.opencode/
+.serena/
+.agents/
+
+# knowledge graph
+.ua/
+
+# generated artifacts
+*.log

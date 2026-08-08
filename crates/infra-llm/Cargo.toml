@@ -1,0 +1,12 @@
+[package]
+name = "harxes-infra-llm"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+harxes-core-domain  = { path = "../core-domain" }
+harxes-infra-auth   = { path = "../infra-auth" }
+async-trait  = { workspace = true }
+serde        = { workspace = true }
+serde_json   = { workspace = true }
+reqwest      = { workspace = true }

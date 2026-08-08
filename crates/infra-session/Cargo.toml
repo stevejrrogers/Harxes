@@ -1,0 +1,9 @@
+[package]
+name = "harxes-infra-session"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+harxes-core-domain = { path = "../core-domain" }
+serde= { workspace = true }
+serde_json = { workspace = true }

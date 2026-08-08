@@ -1,0 +1,9 @@
+[package]
+name = "harxes-infra-fs"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+harxes-core-domain = { path = "../core-domain" }
+async-trait   = { workspace = true }
+tokio         = { workspace = true }

@@ -1,0 +1,13 @@
+[package]
+name = "harxes-app"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+harxes-core-domain = { path = "../core-domain" }
+serde      = { workspace = true }
+thiserror  = { workspace = true }
+async-trait= { workspace = true }
+
+[dev-dependencies]
+tokio      = { workspace = true }
