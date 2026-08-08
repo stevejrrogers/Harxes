@@ -217,7 +217,8 @@ fn run_repl(wiring: &compose::Wiring, cli: &Cli) {
             // Slash commands handled here.
             match t.as_str() {
                 "/help" => {
-                    st.lines.push(tui::ChatLine::Agent(String ::from("/help      this help\n/clear     clear the screen\n/cost      total tokens used\n/model X   switch model\n/compact   summarize context\n/sessions  list saved sessions\n/remember X save a note to agent memory\n/resume I  load saved session by id\n/plan T    break task T into a checklist\n/todo done N   tick item N on the plan\n/export F  write transcript to file F.md\n/cost      tokens + estimated cost\n/exit      quit")));
+                    st.lines.push(tui::ChatLine::Agent(String ::from("/help      this help\n/clear     clear the screen\n/cost      total tokens used\n/model X   switch model\n/compact   summarize context\n/sessions  list saved sessions\n/remember X save a note to agent memory\n/resume I  load saved session by id\n/plan T    break task T into a checklist
+/theme D|L   switch light/dark theme\n/todo done N   tick item N on the plan\n/export F  write transcript to file F.md\n/cost      tokens + estimated cost\n/exit      quit")));
                     return;
                 }
                 "/cost" => {
@@ -349,6 +350,23 @@ fn run_repl(wiring: &compose::Wiring, cli: &Cli) {
                     return;
                 }
 
+                _ if t == "/theme" || t.starts_with("/theme ") => {
+                    let arg = t.trim_start_matches("/theme").trim().to_lowercase();
+                    match arg.as_str() {
+                        "light" => {
+                            st.theme = tui::PaneTheme::light();
+                            st.lines.push(tui::ChatLine::Tool("theme: light".into()));
+                        }
+                        "dark" => {
+                            st.theme = tui::PaneTheme::dark();
+                            st.lines.push(tui::ChatLine::Tool("theme: dark".into()));
+                        }
+                        _ => st.lines.push(tui::ChatLine::Agent(String::from(
+                            "usage: /theme dark|light",
+                        ))),
+                    }
+                    return;
+                }
                 _ if t.starts_with("/export ") => {
                     let path = t.trim_start_matches("/export ").trim().to_string();
                     if path.is_empty() {

@@ -14,6 +14,28 @@ use syntect::highlighting::{Color as SynColor, FontStyle as SynFont};
 use syntect::highlighting::{Theme, ThemeSet};
 use syntect::parsing::{SyntaxReference, SyntaxSet};
 
+/// Light/dark theme controlling pane backgrounds.
+#[derive(Debug, Clone, Copy)]
+pub struct PaneTheme {
+    pub bg_status: Color,
+    pub bg_input: Color,
+}
+
+impl PaneTheme {
+    pub fn dark() -> Self {
+        Self {
+            bg_status: Color::Indexed(234),
+            bg_input: Color::Indexed(236),
+        }
+    }
+    pub fn light() -> Self {
+        Self {
+            bg_status: Color::White,
+            bg_input: Color::Indexed(254),
+        }
+    }
+}
+
 /// A checklist item the agent breaks its task down into.
 #[derive(Debug, Clone)]
 pub struct TaskItem {
@@ -102,6 +124,8 @@ pub struct AppState {
     pub approval_prompt: Option<String>,
     /// Agent-proposed plan broken into subtasks with checkboxes.
     pub plan: Vec<TaskItem>,
+    /// Pane background theme (dark or light).
+    pub theme: PaneTheme,
 }
 
 impl AppState {
@@ -133,6 +157,7 @@ impl AppState {
             active_tools: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
             approval_prompt: None,
             plan: vec![],
+            theme: PaneTheme::dark(),
         }
     }
 
@@ -190,8 +215,6 @@ impl AppState {
         }
     }
 }
-const BG_STATUS: Color = Color::Indexed(234);
-const BG_INPUT: Color = Color::Indexed(236);
 
 fn agent_lines(text: &str) -> Vec<Line<'static>> {
     if !text.contains("```") {
@@ -352,7 +375,7 @@ fn status_panel(frame: &mut Frame, state: &AppState, area: Rect) {
         Span::raw(format!("${:.4}", state.status.total_cost)),
     ]));
     frame.render_widget(
-        Paragraph::new(text).style(Style::default().bg(BG_STATUS).fg(Color::White)),
+        Paragraph::new(text).style(Style::default().bg(state.theme.bg_status).fg(Color::White)),
         area,
     );
 }
@@ -419,7 +442,7 @@ fn tasks_panel(frame: &mut Frame, state: &AppState, area: Rect) {
         )]));
     }
     frame.render_widget(
-        Paragraph::new(text).style(Style::default().bg(BG_STATUS).fg(Color::White)),
+        Paragraph::new(text).style(Style::default().bg(state.theme.bg_status).fg(Color::White)),
         area,
     );
 }
@@ -456,7 +479,7 @@ fn input_pane(frame: &mut Frame, state: &AppState, area: Rect) {
         }
     }
     frame.render_widget(
-        Paragraph::new(lines).style(Style::default().bg(BG_INPUT).fg(Color::White)),
+        Paragraph::new(lines).style(Style::default().bg(state.theme.bg_input).fg(Color::White)),
         area,
     );
 }
@@ -711,7 +734,7 @@ fn code_block_lines(lang: &str, code: &str) -> Vec<Line<'static>> {
     out
 }
 
-pub const SLASH_COMMANDS: [&str; 13] = [
+pub const SLASH_COMMANDS: [&str; 14] = [
     "/help",
     "/clear",
     "/cost",
@@ -723,6 +746,7 @@ pub const SLASH_COMMANDS: [&str; 13] = [
     "/remember ",
     "/plan ",
     "/todo",
+    "/theme",
     "/export ",
     "/exit",
 ];
@@ -793,6 +817,14 @@ fn completion_menu(frame: &mut Frame, completions: &[String], selected: usize, a
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn pane_theme_dark_and_light_differ() {
+        let d = PaneTheme::dark();
+        let l = PaneTheme::light();
+        assert_ne!(d.bg_status, l.bg_status);
+        assert_ne!(d.bg_input, l.bg_input);
+    }
     use super::*;
     use ratatui::{backend::TestBackend, Terminal};
     #[test]
