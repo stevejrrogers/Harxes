@@ -353,29 +353,38 @@ fn run_repl(wiring: &compose::Wiring, cli: &Cli) {
                     let path = t.trim_start_matches("/export ").trim().to_string();
                     if path.is_empty() {
                         st.lines.push(tui::ChatLine::Agent(String::from(
-                            "usage: /export <file.md>",
+                            "usage: /export <file.md|.html>",
                         )));
                         return;
                     }
                     let tb = trx.borrow();
-                    let mut md = String::from("# Harxes session\n\n");
+                    let mut body = String::new();
                     for m in tb.iter() {
                         match m.role {
-                            Role::User => md.push_str(&format!("## User\n{}\n\n", m.content)),
-                            Role::System => md.push_str(&format!("_system:_ {}\n\n", m.content)),
-                            _ => md.push_str(&format!("## Assistant\n{}\n\n", m.content)),
+                            Role::User => body.push_str(&format!("## User\n{}\n\n", m.content)),
+                            Role::System => body.push_str(&format!("_system:_ {}\n\n", m.content)),
+                            _ => body.push_str(&format!("## Assistant\n{}\n\n", m.content)),
                         }
                         for tc in &m.tool_calls {
-                            md.push_str(&format!(
+                            body.push_str(&format!(
                                 "> tool: **{}**\n```json\n{}\n```\n",
                                 tc.name, tc.arguments
                             ));
                         }
                     }
-                    match std::fs::write(&path, &md) {
-                        Ok(_) => st
-                            .lines
-                            .push(tui::ChatLine::Tool(format!("exported to {path}"))),
+                    let sess = sess_cell.borrow().clone();
+                    let meta = format!("**session:** {sess}\n\n**model:** {}  \n**tokens:** {} (in {}/out {})  \n**cost:** ${:.4}\n\n", st.status.model, st.status.total_tokens, st.status.total_input_tokens, st.status.total_output_tokens, st.status.total_cost);
+                    let is_html = path.to_lowercase().ends_with(".html");
+                    let content = if is_html {
+                        html_page(&sess, &meta, &body)
+                    } else {
+                        format!("# Harxes session\n\n{}\n{}", meta, body)
+                    };
+                    match std::fs::write(&path, &content) {
+                        Ok(_) => st.lines.push(tui::ChatLine::Tool(format!(
+                            "exported {} to {path}",
+                            if is_html { "html" } else { "markdown" }
+                        ))),
                         Err(e) => st.lines.push(tui::ChatLine::Agent(format!("error: {e}"))),
                     }
                     drop(tb);
@@ -696,6 +705,30 @@ async fn generate_plan(
             .collect(),
         Err(_) => vec![],
     }
+}
+
+/// Render the session as a self-contained dark-styled HTML page.
+fn html_page(session: &str, meta: &str, body: &str) -> String {
+    let esc_body = body
+        .replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;");
+    let tmpl = r#"<!DOCTYPE html>
+<html><head><meta charset="utf-8"><title>Harxes session</title>
+<style>
+body{background:#0d1117;color:#e6edf3;font-family:system-ui,sans-serif;max-width:820px;margin:40px auto;padding:0 20px}
+h1{color:#58a6ff}h2{color:#79c0ff}pre{background:#161b22;padding:12px;border-radius:8px;overflow-x:auto}
+code{background:#161b22;padding:2px 5px;border-radius:4px}blockquote{border-left:3px solid #30363d;margin-left:0;padding-left:14px}
+</style></head><body>
+<h1>Harxes session</h1>
+<p><strong>session:</strong> {session}</p>
+<hr>
+<h2>Metadata</h2><div>{meta}</div>
+<h2>Transcript</h2><pre>{esc_body}</pre>
+</body></html>"#;
+    tmpl.replace("{session}", session)
+        .replace("{meta}", meta)
+        .replace("{esc_body}", &esc_body)
 }
 
 /// Rough per-1k-token pricing estimate (USD) for common models.
