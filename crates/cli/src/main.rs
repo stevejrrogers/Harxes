@@ -11,8 +11,9 @@ mod ui;
 
 use clap::Parser;
 use harxes_app::ports::agent::AgentPort;
-use harxes_core_domain::domain::value_objects::{Message, ProviderId};
+use harxes_core_domain::domain::value_objects::{Message, ProviderId, Role};
 use harxes_core_domain::ports::{SessionRecord, SessionStorePort};
+use harxes_infra_fs::context::ContextStore;
 use harxes_infra_session::JsonSessionStore;
 use std::sync::Arc;
 
@@ -174,6 +175,8 @@ fn run_repl(wiring: &compose::Wiring, cli: &Cli) {
     let (tx, rx) =
         std::sync::mpsc::channel::<Result<(Vec<tui::ChatLine>, u64, Vec<Message>), String>>();
     let config_dir = compose::default_config_dir();
+    // Project-scoped agent context: agents write/re-read state under `<cwd>/.harxes`.
+    let ctx_store = ContextStore::new(std::path::PathBuf::from(".harxes"));
     let handle = rt.handle().clone();
 
     state
@@ -195,7 +198,7 @@ fn run_repl(wiring: &compose::Wiring, cli: &Cli) {
             // Slash commands handled here.
             match t.as_str() {
                 "/help" => {
-                    st.lines.push(tui::ChatLine::Agent(String ::from("/help      this help\n/clear     clear the screen\n/cost      total tokens used\n/model X   switch model\n/compact   summarize context\n/sessions  list saved sessions\n/cost      tokens + estimated cost\n/exit      quit")));
+                    st.lines.push(tui::ChatLine::Agent(String ::from("/help      this help\n/clear     clear the screen\n/cost      total tokens used\n/model X   switch model\n/compact   summarize context\n/sessions  list saved sessions\n/remember X save a note to agent memory\n/cost      tokens + estimated cost\n/exit      quit")));
                     return;
                 }
                 "/cost" => {
@@ -292,6 +295,27 @@ fn run_repl(wiring: &compose::Wiring, cli: &Cli) {
                     st.lines.push(tui::ChatLine::Tool("undid last turn".into()));
                     return;
                 }
+                _ if t.starts_with("/remember ") => {
+                    let note = t.trim_start_matches("/remember ").trim().to_string();
+                    if note.is_empty() {
+                        st.lines.push(tui::ChatLine::Agent(String::from(
+                            "usage: /remember <note>",
+                        )));
+                    } else {
+                        match ctx_store.remember_session(&session_id, &note) {
+                            Ok(_) => {
+                                let _ =
+                                    ctx_store.remember_workspace(&format!("[{session_id}] {note}"));
+                                st.lines
+                                    .push(tui::ChatLine::Tool(format!("remembered: {note}")));
+                            }
+                            Err(e) => st
+                                .lines
+                                .push(tui::ChatLine::Agent(format!("error saving memory: {e}"))),
+                        }
+                    }
+                    return;
+                }
                 _ => {}
             }
 
@@ -310,6 +334,7 @@ fn run_repl(wiring: &compose::Wiring, cli: &Cli) {
             let agent = wiring.agent.clone();
             let pid_str = wiring.provider_id.clone();
             let cfg_dir = config_dir.clone();
+            let ctx_for_turn = ctx_store.clone();
             let sid = session_id.clone();
             let limits = wiring.limits.clone();
             let history_snapshot = trx.borrow().clone();
@@ -321,6 +346,7 @@ fn run_repl(wiring: &compose::Wiring, cli: &Cli) {
                     pid_str,
                     cur_model,
                     cfg_dir,
+                    ctx_for_turn,
                     sid,
                     history_snapshot,
                     t,
@@ -386,6 +412,7 @@ async fn run_turn_owned(
     pid_str: String,
     model: String,
     config_dir: String,
+    ctx_store: ContextStore,
     session_id: String,
     history: Vec<Message>,
     user_msg: String,
@@ -393,8 +420,16 @@ async fn run_turn_owned(
 ) -> Result<(Vec<tui::ChatLine>, u64, Vec<Message>), String> {
     let pid = ProviderId::new(&pid_str).unwrap_or_else(|_| ProviderId::new("anthropic").unwrap());
     let store = JsonSessionStore::new(config_dir);
+    // Agent started working: ensure its session context directory exists.
+    let _ = ctx_store.ensure_session(&session_id);
+    // Load persisted session + workspace memory into the transcript.
+    let mut messages = history;
+    let ctx_block = ctx_store.build_context_block(&session_id);
+    if !ctx_block.trim().is_empty() {
+        messages.insert(0, Message::new(Role::System, ctx_block));
+    }
     match agent
-        .continue_chat(&pid, &model, &history, &user_msg, &limits)
+        .continue_chat(&pid, &model, &messages, &user_msg, &limits)
         .await
     {
         Ok(res) => {
@@ -422,6 +457,7 @@ async fn run_turn_owned(
         Err(e) => Err(e.to_string()),
     }
 }
+
 /// Rough per-1k-token pricing estimate (USD) for common models.
 fn estimate_cost(model: &str, tokens: u64) -> f64 {
     let per_1k = match model.to_lowercase().as_str() {

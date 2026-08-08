@@ -206,7 +206,7 @@ fn chat_pane(frame: &mut Frame, state: &mut AppState, area: Rect) {
 fn status_panel(frame: &mut Frame, state: &AppState, area: Rect) {
     let mut text = ratatui::text::Text::default();
     text.push_line(Line::from(vec![Span::styled(
-        "  STATUS ",
+        "  STATUS",
         Style::new().fg(Color::Magenta).bold(),
     )]));
     text.push_line(Line::from(vec![Span::raw("")]));
@@ -226,15 +226,6 @@ fn status_panel(frame: &mut Frame, state: &AppState, area: Rect) {
         Span::styled("cost     ", Style::new().fg(Color::Green).bold()),
         Span::raw(format!("${:.4}", state.status.total_cost)),
     ]));
-    text.push_line(Line::from(vec![Span::raw("")]));
-    text.push_line(Line::from(vec![Span::styled(
-        "  tools used ",
-        Style::new().fg(Color::Cyan).bold(),
-    )]));
-    for t in &state.status.tools_used {
-        text.push_line(Line::from(vec![Span::raw(format!("   ⏺ {t}"))]));
-    }
-
     frame.render_widget(
         Paragraph::new(text).style(Style::default().bg(BG_STATUS).fg(Color::White)),
         area,
@@ -242,6 +233,9 @@ fn status_panel(frame: &mut Frame, state: &AppState, area: Rect) {
 }
 
 fn tasks_panel(frame: &mut Frame, state: &AppState, area: Rect) {
+    if !state.processing && state.status.tools_used.is_empty() {
+        return;
+    }
     let mut text = ratatui::text::Text::default();
     text.push_line(Line::from(vec![Span::styled(
         "  TASKS",
@@ -302,11 +296,13 @@ pub fn draw(frame: &mut Frame, state: &mut AppState) {
         .direction(Direction::Vertical)
         .constraints([Constraint::Min(1), Constraint::Length(3)])
         .split(cols[0]);
-    // Right column: status (top) + tasks (rest).
+    // Right column: status sized to its content at top; tasks fill the rest.
     let r = cols[1];
-    let split = (r.height * 55 / 100).max(5);
-    let status_area = Rect::new(r.x, r.y, r.width, split);
-    let tasks_area = Rect::new(r.x, r.y + split, r.width, r.height.saturating_sub(split));
+    let sh = r.height.min(9);
+    let status_area = Rect::new(r.x, r.y, r.width, sh);
+    let ty = r.y.saturating_add(sh);
+    let th = r.height.saturating_sub(sh);
+    let tasks_area = Rect::new(r.x, ty, r.width, th);
     chat_pane(frame, state, left[0]);
     input_pane(frame, state, left[1]);
     status_panel(frame, state, status_area);
@@ -522,7 +518,7 @@ fn code_block_lines(lang: &str, code: &str) -> Vec<Line<'static>> {
     out
 }
 
-pub const SLASH_COMMANDS: [&str; 8] = [
+pub const SLASH_COMMANDS: [&str; 9] = [
     "/help",
     "/clear",
     "/cost",
@@ -530,6 +526,7 @@ pub const SLASH_COMMANDS: [&str; 8] = [
     "/compact",
     "/undo",
     "/sessions",
+    "/remember ",
     "/exit",
 ];
 
@@ -559,15 +556,22 @@ fn completion_menu(frame: &mut Frame, completions: &[String], selected: usize, a
     if completions.is_empty() {
         return;
     }
-    	let shown=completions.len().min(5);
-    	let w=24u16;
-    	let mut h=(shown as u16)+2;
-    	let x=1u16;
-    	// Keep the menu within the terminal height.
-    	let max_h=frame.area().height.saturating_sub(anchor_y).saturating_sub(1).max(3);
-    	if h>max_h{h=max_h;}
-    	let y=anchor_y.min(frame.area().height.saturating_sub(h));
-    	let popup=Rect::new(x,y,w,h);
+    let shown = completions.len().min(5);
+    let w = 24u16;
+    let mut h = (shown as u16) + 2;
+    let x = 1u16;
+    // Keep the menu within the terminal height.
+    let max_h = frame
+        .area()
+        .height
+        .saturating_sub(anchor_y)
+        .saturating_sub(1)
+        .max(3);
+    if h > max_h {
+        h = max_h;
+    }
+    let y = anchor_y.min(frame.area().height.saturating_sub(h));
+    let popup = Rect::new(x, y, w, h);
     let mut text = ratatui::text::Text::default();
     for (i, c) in completions.iter().take(shown).enumerate() {
         let sel = i == selected % completions.len();

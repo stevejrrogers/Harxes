@@ -1,6 +1,8 @@
 //! Driven-port adapter (hexagonal infrastructure ring): reads and writes files
 //! on the host filesystem for the [`FileSystemPort`].
 
+pub mod context;
+
 use async_trait::async_trait;
 use harxes_core_domain::ports::{FileSystemPort, FsError};
 
