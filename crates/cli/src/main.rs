@@ -199,7 +199,7 @@ fn run_repl(wiring: &compose::Wiring, cli: &Cli) {
             // Slash commands handled here.
             match t.as_str() {
                 "/help" => {
-                    st.lines.push(tui::ChatLine::Agent(String ::from("/help      this help\n/clear     clear the screen\n/cost      total tokens used\n/model X   switch model\n/compact   summarize context\n/sessions  list saved sessions\n/remember X save a note to agent memory\n/cost      tokens + estimated cost\n/exit      quit")));
+                    st.lines.push(tui::ChatLine::Agent(String ::from("/help      this help\n/clear     clear the screen\n/cost      total tokens used\n/model X   switch model\n/compact   summarize context\n/sessions  list saved sessions\n/remember X save a note to agent memory\n/export F  write transcript to file F.md\n/cost      tokens + estimated cost\n/exit      quit")));
                     return;
                 }
                 "/cost" => {
@@ -226,6 +226,38 @@ fn run_repl(wiring: &compose::Wiring, cli: &Cli) {
                         st.lines
                             .push(tui::ChatLine::Tool(format!("{id}  ({n} msgs)")));
                     }
+                    return;
+                }
+                _ if t.starts_with("/export ") => {
+                    let path = t.trim_start_matches("/export ").trim().to_string();
+                    if path.is_empty() {
+                        st.lines.push(tui::ChatLine::Agent(String::from(
+                            "usage: /export <file.md>",
+                        )));
+                        return;
+                    }
+                    let tb = trx.borrow();
+                    let mut md = String::from("# Harxes session\n\n");
+                    for m in tb.iter() {
+                        match m.role {
+                            Role::User => md.push_str(&format!("## User\n{}\n\n", m.content)),
+                            Role::System => md.push_str(&format!("_system:_ {}\n\n", m.content)),
+                            _ => md.push_str(&format!("## Assistant\n{}\n\n", m.content)),
+                        }
+                        for tc in &m.tool_calls {
+                            md.push_str(&format!(
+                                "> tool: **{}**\n```json\n{}\n```\n",
+                                tc.name, tc.arguments
+                            ));
+                        }
+                    }
+                    match std::fs::write(&path, &md) {
+                        Ok(_) => st
+                            .lines
+                            .push(tui::ChatLine::Tool(format!("exported to {path}"))),
+                        Err(e) => st.lines.push(tui::ChatLine::Agent(format!("error: {e}"))),
+                    }
+                    drop(tb);
                     return;
                 }
                 _ if t.starts_with("/model ") => {
