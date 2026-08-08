@@ -268,14 +268,7 @@ fn input_pane(frame: &mut Frame, state: &AppState, area: Rect) {
         }
     }
     frame.render_widget(
-        Paragraph::new(Line::from(content))
-            .style(Style::default().bg(BG_INPUT).fg(Color::White))
-            .block(
-                Block::default()
-                    .borders(Borders::LEFT | Borders::TOP)
-                    .border_type(ratatui::widgets::BorderType::Thick)
-                    .border_style(Style::new().fg(Color::DarkGray)),
-            ),
+        Paragraph::new(Line::from(content)).style(Style::default().bg(BG_INPUT).fg(Color::White)),
         area,
     );
 }
@@ -293,7 +286,11 @@ pub fn draw(frame: &mut Frame, state: &mut AppState) {
     title_bar(frame, state, outer[0]);
     let mid = Layout::default()
         .direction(Direction::Horizontal)
-        .constraints([Constraint::Percentage(60), Constraint::Percentage(40)])
+        .constraints([
+            Constraint::Percentage(50),
+            Constraint::Percentage(25),
+            Constraint::Percentage(25),
+        ])
         .split(outer[1]);
     chat_pane(frame, state, mid[0]);
     status_panel(frame, state, mid[1]);
