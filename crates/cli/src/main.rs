@@ -186,9 +186,7 @@ fn run_repl(wiring: &compose::Wiring, cli: &Cli) {
         .lines
         .push(tui::ChatLine::Tool(format!("session {session_id}")));
     if state.lines.is_empty() {
-        state.lines.push(tui::ChatLine::Agent(String::from(
-            "✦ Harxes ready. Type below and press Enter.",
-        )));
+        state.lines.push(tui::ChatLine::Agent(welcome_banner()));
     }
 
     let result = tui::run(
@@ -653,8 +651,7 @@ async fn run_turn_owned(
                 created_at: String::new(),
                 transcript: new_hist.clone(),
             });
-            let mut lines = vec![tui::ChatLine::Agent(res.outcome.final_text.clone())];
-            // Detailed per-tool blocks: pair each requested call with its result.
+            // Emit what the agent did and said, in chronological order.
             let mut results: std::collections::HashMap<String, String> = Default::default();
             for m in &new_hist {
                 if m.role == Role::Tool {
@@ -663,7 +660,13 @@ async fn run_turn_owned(
                     }
                 }
             }
+            let mut lines: Vec<tui::ChatLine> = Vec::new();
             for m in &new_hist {
+                // Surface the agent’s spoken (non-empty) commentary.
+                if m.role == Role::Assistant && !m.content.trim().is_empty() {
+                    lines.push(tui::ChatLine::Agent(m.content.clone()));
+                }
+                // Pair each requested tool call with its result.
                 for tc in &m.tool_calls {
                     let detail = tool_preview(tc.name.as_str(), tc.arguments.as_str());
                     match results.get(&tc.id) {
@@ -674,6 +677,8 @@ async fn run_turn_owned(
                     }
                 }
             }
+            // Final answer last.
+            lines.push(tui::ChatLine::Agent(res.outcome.final_text.clone()));
 
             Ok((lines, in_tok, out_tok, new_hist))
         }
@@ -747,6 +752,17 @@ code{background:#161b22;padding:2px 5px;border-radius:4px}blockquote{border-left
     tmpl.replace("{session}", session)
         .replace("{meta}", meta)
         .replace("{esc_body}", &esc_body)
+}
+
+/// Modern ASCII-art welcome banner shown when the TUI starts.
+fn welcome_banner() -> String {
+    let logo = r#"
+       ___  __               
+      / _ |/ /__  ____ ___   
+     / __ / / _ \/ __ `__ \ 
+    /_/ |_/_/\___/\_/ /_/ /_/
+"#;
+    format!("{}\n\n  Harxes v{} — a Rust coding agent that plans, runs tools and remembers.\n  \n  Type a task below and press Enter, or use commands:\n  /plan <task>   break a task into a checklist\n  /theme         switch light/dark\n  /export F      save session (markdown or HTML)\n  /resume <id>   load a past session\n  /help          all commands", logo, env!("CARGO_PKG_VERSION"))
 }
 
 /// Rough per-1k-token pricing estimate (USD) for common models.
