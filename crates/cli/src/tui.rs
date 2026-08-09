@@ -106,6 +106,8 @@ fn current_git_branch() -> Option<String> {
 pub struct AppState {
     pub lines: Vec<ChatLine>,
     pub input: String,
+    /// Byte offset of the edit cursor inside [`Self::input`].
+    pub cursor_ix: usize,
     pub processing: bool,
     pub scroll: u16,
     pub status: StatusInfo,
@@ -133,6 +135,7 @@ impl AppState {
         Self {
             lines: vec![],
             input: String::new(),
+            cursor_ix: 0,
             processing: false,
             scroll: 0,
             status: StatusInfo {
@@ -561,28 +564,42 @@ fn input_pane(frame: &mut Frame, state: &AppState, area: Rect) {
             cur,
         ]));
     } else {
-        let parts: Vec<&str> = state.input.split('\n').collect();
-        for (i, part) in parts.iter().enumerate() {
-            let is_last = i == parts.len() - 1;
-            if is_last {
-                lines.push(Line::from(vec![
-                    Span::styled("❯ ", prompt_style),
-                    Span::raw(part.to_string()),
-                    cur.clone(),
-                ]));
-            } else {
-                lines.push(Line::from(vec![
-                    Span::styled("❯ ", prompt_style),
-                    Span::raw(part.to_string()),
-                ]));
+        // Split into lines with their starting byte offsets.
+        let mut starts: Vec<usize> = vec![0];
+        for (i, b) in state.input.bytes().enumerate() {
+            if b == b'\n' {
+                starts.push(i + 1);
             }
+        }
+        // Find which line the cursor is on (largest start <= cursor_ix).
+        let cursor = state.cursor_ix.min(state.input.len());
+        let line_idx = starts.partition_point(|&s| s <= cursor).saturating_sub(1);
+        let line_start = starts[line_idx];
+        // Column in chars from line start to cursor.
+        let col_chars = state.input[line_start..cursor].chars().count();
+        for (i, part) in state.input.split('\n').enumerate() {
+            let mut spans = vec![Span::styled("❯ ", prompt_style)];
+            if i == line_idx {
+                let nchars = part.chars().count();
+                let col = col_chars.min(nchars);
+                let before: String = part.chars().take(col).collect();
+                let after: String = part.chars().skip(col).collect();
+                spans.push(Span::raw(before));
+                spans.push(cur.clone());
+                if !after.is_empty() {
+                    spans.push(Span::raw(after));
+                }
+            } else {
+                spans.push(Span::raw(part.to_string()));
+            }
+            lines.push(Line::from(spans));
         }
     }
     // Copilot-style keybinding hint bar.
     if area.height >= 3 {
         lines.push(Line::raw(""));
         lines.push(Line::from(vec![Span::styled(
-            "  Enter send · Alt+Enter newline · Up/Down history · Esc quit",
+            "  Enter send · Alt+Enter newline · ←→ move · Up/Down history · Esc quit",
             Style::new().fg(Color::DarkGray),
         )]));
     }
@@ -663,17 +680,51 @@ pub fn run(
                 }
                 match k.code {
                     KeyCode::Char(c) => {
-                        state.input.push(c);
+                        let ix = state.cursor_ix.min(state.input.len());
+                        if !state.input.is_char_boundary(ix) {
+                            continue;
+                        }
+                        state.input.insert(ix, c);
+                        state.cursor_ix = ix + c.len_utf8();
                         update_completions(state);
                     }
                     KeyCode::Backspace => {
-                        state.input.pop();
-                        update_completions(state);
+                        let cur = state.cursor_ix.min(state.input.len());
+                        if cur > 0 && !state.input.is_empty() {
+                            let sidx = state.input.floor_char_boundary(cur - 1);
+                            if sidx < cur {
+                                state.input.replace_range(sidx..cur, "");
+                                state.cursor_ix = sidx;
+                            }
+                            update_completions(state);
+                        }
                     }
+                    KeyCode::Left => {
+                        if !state.completions.is_empty() || state.hist_pos.is_some() {
+                            continue;
+                        }
+                        let cur = state.cursor_ix.min(state.input.len());
+                        if cur > 0 && !state.input.is_empty() {
+                            state.cursor_ix = state.input.floor_char_boundary(cur - 1);
+                        }
+                    }
+                    KeyCode::Right => {
+                        if !state.completions.is_empty() || state.hist_pos.is_some() {
+                            continue;
+                        }
+                        let cur = state.cursor_ix.min(state.input.len());
+                        if cur < state.input.len() {
+                            if let Some(ch) = state.input[cur..].chars().next() {
+                                state.cursor_ix = cur + ch.len_utf8();
+                            }
+                        }
+                    }
+
                     KeyCode::Enter => {
                         if !state.completions.is_empty() {
                             if let Some(c) = state.completions.get(state.completion_sel) {
                                 state.input = c.clone();
+                                state.cursor_ix = state.input.len();
                             }
                             state.completions.clear();
                             continue;
@@ -734,6 +785,7 @@ pub fn run(
                         };
                         if pos < n {
                             state.input = state.history[n - 1 - pos].clone();
+                            state.cursor_ix = state.input.len();
                         }
                         state.hist_pos = Some(pos);
                     }
@@ -752,6 +804,7 @@ pub fn run(
                                 let n = state.history.len();
                                 if np < n {
                                     state.input = state.history[n - 1 - np].clone();
+                                    state.cursor_ix = state.input.len();
                                 };
                                 state.hist_pos = Some(np);
                             }
@@ -773,6 +826,7 @@ pub fn run(
                             // Exit multi-line compose: drop the trailing line.
                             if let Some(pos) = state.input.rfind('\n') {
                                 state.input.truncate(pos);
+                                state.cursor_ix = state.cursor_ix.min(state.input.len());
                             }
                         } else {
                             break;
@@ -934,6 +988,33 @@ mod tests {
     }
     use super::*;
     use ratatui::{backend::TestBackend, Terminal};
+    #[test]
+    fn cursor_renders_at_position_in_input_pane() {
+        use ratatui::{backend::TestBackend, Terminal};
+        let mut st = AppState::new("litellm", "DeepSeek-V4-Flash");
+        st.input = "hello world".to_string();
+        // Place the cursor after 'hello' (index 5).
+        st.cursor_ix = 5;
+        st.spinner = 0; // ensure blinking block is shown
+                        // Wide so the status column doesn't crowd out the input line.
+        let backend = TestBackend::new(80, 10);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|f| draw(f, &mut st)).unwrap();
+        let buf = terminal.backend().buffer();
+        // Concatenate every row so we can find where the cursor block lands.
+        let all: String = (0..buf.area.height)
+            .flat_map(|y| {
+                (0..buf.area.width)
+                    .map(move |x| buf[(x, y)].symbol().chars().next().unwrap_or(' '))
+                    .chain(std::iter::once('\n'))
+            })
+            .collect();
+        assert!(
+            all.contains("hello\u{258b}"),
+            "cursor not positioned after 'hello': {all}"
+        );
+    }
+
     #[test]
     fn capture_frame() {
         let mut st = AppState::new("litellm", "DeepSeek-V4-Flash");
