@@ -571,8 +571,11 @@ fn input_pane(frame: &mut Frame, state: &AppState, area: Rect) {
                 starts.push(i + 1);
             }
         }
-        // Find which line the cursor is on (largest start <= cursor_ix).
-        let cursor = state.cursor_ix.min(state.input.len());
+        // Find which line the cursor is on. Floor the index onto a character
+        // boundary so slicing below never panics even if a code path ever left
+        // the cursor mid-multibyte-character.
+        let raw_cursor = state.cursor_ix.min(state.input.len());
+        let cursor = state.input.floor_char_boundary(raw_cursor);
         let line_idx = starts.partition_point(|&s| s <= cursor).saturating_sub(1);
         let line_start = starts[line_idx];
         // Column in chars from line start to cursor.
@@ -712,7 +715,9 @@ pub fn run(
                         if !state.completions.is_empty() || state.hist_pos.is_some() {
                             continue;
                         }
-                        let cur = state.cursor_ix.min(state.input.len());
+                        let raw = state.cursor_ix.min(state.input.len());
+                        // Floor onto a boundary so the slice below never panics.
+                        let cur = state.input.floor_char_boundary(raw);
                         if cur < state.input.len() {
                             if let Some(ch) = state.input[cur..].chars().next() {
                                 state.cursor_ix = cur + ch.len_utf8();
@@ -828,6 +833,12 @@ pub fn run(
                                 state.input.truncate(pos);
                                 state.cursor_ix = state.cursor_ix.min(state.input.len());
                             }
+                        } else if !state.input.is_empty() || state.processing {
+                            // Cancel current editing; don't quit while there is
+                            // typed text or an active task (guards against a
+                            // stray Esc breaking out of the app).
+                            state.input.clear();
+                            state.cursor_ix = 0;
                         } else {
                             break;
                         }
@@ -1013,6 +1024,35 @@ mod tests {
             all.contains("hello\u{258b}"),
             "cursor not positioned after 'hello': {all}"
         );
+    }
+
+    #[test]
+    fn draw_is_stable_across_tricky_input_states() {
+        use ratatui::{backend::TestBackend, Terminal};
+        let mut st = AppState::new("litellm", "DeepSeek-V4-Flash");
+        // Empty input + processing + stale cursor (non-zero) -> must not panic.
+        st.processing = true;
+        st.cursor_ix = 7;
+        st.input.clear();
+        let backend = TestBackend::new(80, 12);
+        let mut t1 = Terminal::new(backend).unwrap();
+        t1.draw(|f| draw(f, &mut st)).unwrap();
+
+        // Multi-line with cursor placed between two lines.
+        let mut st2 = AppState::new("litellm", "DeepSeek-V4-Flash");
+        st2.input.push_str("line one\nline two");
+        st2.cursor_ix = 5; // right after "line "
+        let b2 = TestBackend::new(80, 12);
+        let mut t2 = Terminal::new(b2).unwrap();
+        t2.draw(|f| draw(f, &mut st2)).unwrap();
+
+        // Emoji mid-line then cursor inside it: floor_char_boundary safety.
+        let mut st3 = AppState::new("litellm", "DeepSeek-V4-Flash");
+        st3.input.push_str("a\u{1F600}b"); // a😀b
+        st3.cursor_ix = 4; // inside the emoji bytes
+        let b3 = TestBackend::new(80, 12);
+        let mut t3 = Terminal::new(b3).unwrap();
+        t3.draw(|f| draw(f, &mut st3)).unwrap();
     }
 
     #[test]
