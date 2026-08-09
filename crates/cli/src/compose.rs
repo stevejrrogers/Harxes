@@ -37,6 +37,53 @@ pub fn default_config_dir() -> String {
     std::env::var("HARXES_HOME").unwrap_or_else(|_| format!("{}/.harxes", std::env!("HOME")))
 }
 
+/// Default AGENTS.md content, written only when the project has none.
+/// AGENTS.md is the cross-agent instruction file (Claude Code, opencode,
+/// cursor, codex all auto-load it into context).
+const AGENTS_MD_TEMPLATE: &str = r#"# Project agent guide
+
+This file is read automatically by AI coding agents (Harxes, Claude Code,
+opencode, cursor, codex) to learn how to work in this project.
+
+## Conventions
+- Prefer the language and frameworks already used in this repository.
+- Keep changes minimal and focused; do not touch unrelated code.
+- Add or update tests for any behavior you change.
+
+## Commands
+- Build:  cargo build --release
+- Test:   cargo test --workspace
+- Lint:   cargo clippy --all-targets
+"#;
+
+/// Seed content for shared workspace memory (.harxes/agents/NOTES.md).
+const NOTES_TEMPLATE: &str = r#"# Shared agent memory
+
+This file is shared across sessions. Use /remember to add notes that any
+future session of Harxes (or another agent) should know about this project.
+"#;
+
+/// Create the standard agent-scoped project structure, shared with other
+/// agents (Claude Code, opencode, cursor, codex all auto-read AGENTS.md).
+/// Idempotent: existing files are never overwritten.
+pub fn ensure_project_scaffold() {
+    use std::path::PathBuf;
+    // AGENTS.md lives at the project root (cwd), shared across all agents.
+    let agents_md = PathBuf::from("AGENTS.md");
+    if !agents_md.exists() {
+        let _ = std::fs::write(&agents_md, AGENTS_MD_TEMPLATE);
+    }
+    // .harxes/ agent workspace: memory + per-session context.
+    let harxes = PathBuf::from(".harxes");
+    let _ = std::fs::create_dir_all(harxes.join("agents"));
+    let _ = std::fs::create_dir_all(harxes.join("sessions"));
+    // Seed shared workspace memory file with guidance if absent.
+    let notes = harxes.join("agents").join("NOTES.md");
+    if !notes.exists() {
+        let _ = std::fs::write(&notes, NOTES_TEMPLATE);
+    }
+}
+
 /// Load providers defined on disk (`~/.harxes/config.json`), merging them with
 /// the static built-in registry.
 fn load_custom_providers() -> Vec<ResolvedProvider> {

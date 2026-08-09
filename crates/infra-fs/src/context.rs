@@ -66,9 +66,24 @@ impl ContextStore {
     fn ensure_agents_dir(&self) -> std::io::Result<()> {
         fs::create_dir_all(self.agents_dir())
     }
+    /// Read the shared AGENTS.md from the project root (parent of .harxes).
+    pub fn read_agents_md(&self) -> String {
+        let p = self.root.parent().map(|d| d.join("AGENTS.md"));
+        match p {
+            Some(f) => std::fs::read_to_string(f).unwrap_or_default(),
+            None => String::new(),
+        }
+    }
+
     /// Combine session + workspace context into a block for the system prompt.
     pub fn build_context_block(&self, id: &str) -> String {
         let mut out = String::new();
+        let agents_md = self.read_agents_md();
+        if !agents_md.trim().is_empty() {
+            out.push_str("# Project guide (AGENTS.md)\n");
+            out.push_str(agents_md.trim());
+            out.push_str("\n\n");
+        }
         let sess = self.read_session_context(id);
         if !sess.trim().is_empty() {
             out.push_str("# Session memory\n");

@@ -60,6 +60,10 @@ fn main() {
         }
     };
 
+    // Create the standard agent-scoped project structure (AGENTS.md + .harxes/)
+    // that is shared with other AI agents, before any work begins.
+    compose::ensure_project_scaffold();
+
     if cli.providers {
         for p in compose::available_providers() {
             println!("{p}");
