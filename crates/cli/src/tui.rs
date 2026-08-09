@@ -216,21 +216,87 @@ impl AppState {
     }
 }
 
+/// Split a plain-text line into styled spans, honoring markdown bold
+/// (**text**) so agent output reads like a rendered Copilot chat.
+fn markdown_spans(line: &str) -> Vec<Span<'static>> {
+    let mut spans = Vec::new();
+    let mut rest = line;
+    loop {
+        // Heading: up to three # prefix -> bold colored line.
+        let trimmed_head = rest.trim_start();
+        let level = trimmed_head.chars().take_while(|&c| c == '#').count();
+        if (1..=3).contains(&level)
+            && trimmed_head
+                .as_bytes()
+                .get(level)
+                .is_some_and(|b| b.is_ascii_whitespace())
+        {
+            let body = trimmed_head[level..].trim_start();
+            let color = if level == 1 {
+                Color::Magenta
+            } else if level == 2 {
+                Color::Cyan
+            } else {
+                Color::Blue
+            };
+            spans.push(Span::styled(
+                body.to_string(),
+                Style::new().fg(color).bold(),
+            ));
+            return spans;
+        }
+        // Bold: **text**
+        match rest.find("**") {
+            Some(start) => {
+                if start > 0 {
+                    spans.push(Span::raw(rest[..start].to_string()));
+                }
+                let after = &rest[start + 2..];
+                match after.find("**") {
+                    Some(end) => {
+                        spans.push(Span::styled(after[..end].to_string(), Style::new().bold()));
+                        rest = &after[end + 2..];
+                    }
+                    None => {
+                        spans.push(Span::raw(rest.to_string()));
+                        return spans;
+                    }
+                }
+            }
+            None => {
+                spans.push(Span::raw(rest.to_string()));
+                break;
+            }
+        }
+    }
+    spans
+}
+
 fn agent_lines(text: &str) -> Vec<Line<'static>> {
     if !text.contains("```") {
-        return vec![Line::from(vec![Span::raw(text.to_string())])];
+        // No code fences: render each line with inline markdown styling.
+        let mut out = Vec::new();
+        for ln in text.split('\n') {
+            out.push(Line::from(markdown_spans(ln)));
+        }
+        return out;
     }
     let mut out = Vec::new();
     let mut rest = text;
     loop {
         match rest.find("```") {
             None => {
-                out.push(Line::from(vec![Span::raw(rest.to_string())]));
+                for ln in rest.split('\n') {
+                    out.push(Line::from(markdown_spans(ln)));
+                }
                 break;
             }
             Some(p) => {
                 if p > 0 {
-                    out.push(Line::from(vec![Span::raw(rest[..p].to_string())]));
+                    let seg = &rest[..p];
+                    for ln in seg.split('\n') {
+                        out.push(Line::from(markdown_spans(ln)));
+                    }
                 }
                 rest = &rest[p + 3..];
                 if let Some(e) = rest.find("```") {
@@ -873,7 +939,7 @@ mod tests {
         let mut st = AppState::new("litellm", "DeepSeek-V4-Flash");
         st.lines.push(ChatLine ::User("this is a very long user message that should definitely wrap onto multiple lines within the chat pane so we can confirm paragraph wrapping works correctly".into()));
         st.lines.push(ChatLine::Agent(
-            "Here is code:\n```rust\nfn main(){}\n```".into(),
+            "## Plan\nI will **build** and run it.\n```rust\nfn main(){}\n```".into(),
         ));
         st.lines.push(ChatLine::Tool("Bash echo hi".into()));
         st.input = "line one\nline two".to_string();
