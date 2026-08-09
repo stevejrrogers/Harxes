@@ -281,22 +281,23 @@ fn chat_pane(frame: &mut Frame, state: &mut AppState, area: Rect) {
     for line in &state.lines {
         match line {
             ChatLine::User(t) => {
-                // user bubble, right-ish with green "You" label
-                text.push_line(Line::from(vec![Span::styled(
-                    "  You",
-                    Style::new().fg(Color::Green).bold(),
-                )]));
-                text.push_line(Line::from(vec![Span::styled(
-                    t.to_string(),
-                    Style::new().fg(Color::Rgb(196, 210, 230)),
-                )]));
+                text.push_line(Line::from(vec![
+                    Span::styled("  YOU", Style::new().fg(Color::Green).bold()),
+                    Span::styled(" ──", Style::new().fg(Color::Green)),
+                ]));
+                for u in t.split('\n') {
+                    text.push_line(Line::from(vec![Span::styled(
+                        format!("  {}", u),
+                        Style::new().fg(Color::Rgb(196, 210, 230)),
+                    )]));
+                }
                 text.push_line(Line::raw(""));
             }
             ChatLine::Agent(t) => {
-                text.push_line(Line::from(vec![Span::styled(
-                    "  AI  ✦",
-                    Style::new().fg(Color::Magenta).bold(),
-                )]));
+                text.push_line(Line::from(vec![
+                    Span::styled("  HARXES", Style::new().fg(Color::Magenta).bold()),
+                    Span::styled(" ✦", Style::new().fg(Color::Magenta)),
+                ]));
                 for l in agent_lines(t) {
                     text.push_line(l);
                 }
@@ -304,7 +305,7 @@ fn chat_pane(frame: &mut Frame, state: &mut AppState, area: Rect) {
             }
             ChatLine::Tool(t) => {
                 text.push_line(Line::from(vec![
-                    Span::styled("  ⏺ ", Style::new().fg(Color::DarkGray)),
+                    Span::styled("  ⏻ ", Style::new().fg(Color::DarkGray)),
                     Span::raw(t.to_string()),
                 ]));
             }
@@ -314,7 +315,7 @@ fn chat_pane(frame: &mut Frame, state: &mut AppState, area: Rect) {
     if !state.typing_text.is_empty() {
         let shown = &state.typing_text[..state.typing_shown.min(state.typing_text.len())];
         text.push_line(Line::from(vec![Span::styled(
-            "  AI  ✦",
+            "  HARXES ✦",
             Style::new().fg(Color::Magenta).bold(),
         )]));
         text.push_line(Line::from(vec![
@@ -336,44 +337,74 @@ fn chat_pane(frame: &mut Frame, state: &mut AppState, area: Rect) {
 
 fn status_panel(frame: &mut Frame, state: &AppState, area: Rect) {
     let mut text = ratatui::text::Text::default();
+    let (dot_col, dot_txt) = if state.processing {
+        (
+            Color::Yellow,
+            if state.spinner.is_multiple_of(2) {
+                "●"
+            } else {
+                "○"
+            },
+        )
+    } else {
+        (Color::Green, "●")
+    };
+
+    // Header: working dot + model, then a separator.
     text.push_line(Line::from(vec![Span::styled(
-        "  STATUS",
-        Style::new().fg(Color::Magenta).bold(),
+        format!("  {} WORKING", dot_txt),
+        Style::new().fg(dot_col).bold(),
     )]));
-    text.push_line(Line::from(vec![Span::raw("")]));
+    text.push_line(Line::from(vec![Span::styled(
+        format!("   {}", state.status.model),
+        Style::new().fg(Color::Blue).bold(),
+    )]));
+
+    text.push_line(Line::from(vec![Span::styled(
+        format!("  {}", "─".repeat(26)),
+        Style::new().fg(Color::DarkGray),
+    )]));
+
+    // cwd + git branch.
     text.push_line(Line::from(vec![
-        Span::styled("dir      ", Style::new().fg(Color::White).bold()),
+        Span::styled("  dir      ", Style::new().fg(Color::DarkGray)),
         Span::raw(state.status.cwd.clone()),
     ]));
     if let Some(b) = &state.status.git_branch {
         text.push_line(Line::from(vec![
-            Span::styled("branch   ", Style::new().fg(Color::Magenta).bold()),
-            Span::raw(format!("⎇ {b}")),
+            Span::styled("  branch   ", Style::new().fg(Color::DarkGray)),
+            Span::styled(format!("⎋ {b}"), Style::new().fg(Color::Magenta)),
         ]));
     }
+
+    // Provider + model rows (model moved to header).
     text.push_line(Line::from(vec![
-        Span::styled("provider ", Style::new().fg(Color::Cyan).bold()),
-        Span::raw(state.status.provider.clone()),
+        Span::styled("  provider ", Style::new().fg(Color::DarkGray)),
+        Span::styled(state.status.provider.clone(), Style::new().fg(Color::Cyan)),
     ]));
+
+    // Token usage as a compact progress-style block.
+    text.push_line(Line::from(vec![Span::styled(
+        "  tokens",
+        Style::new().fg(Color::Yellow).bold(),
+    )]));
+    text.push_line(Line::from(vec![Span::styled(
+        format!(
+            "   {}  (in {}/out {})",
+            state.status.total_tokens,
+            state.status.total_input_tokens,
+            state.status.total_output_tokens
+        ),
+        Style::new().fg(Color::DarkGray),
+    )]));
     text.push_line(Line::from(vec![
-        Span::styled("model    ", Style::new().fg(Color::Blue).bold()),
-        Span::raw(state.status.model.clone()),
+        Span::styled("  cost      ", Style::new().fg(Color::DarkGray)),
+        Span::styled(
+            format!("${:.4}", state.status.total_cost),
+            Style::new().fg(Color::Green).bold(),
+        ),
     ]));
-    text.push_line(Line::from(vec![
-        Span::styled("tokens   ", Style::new().fg(Color::Yellow).bold()),
-        Span::raw(state.status.total_tokens.to_string()),
-    ]));
-    text.push_line(Line::from(vec![
-        Span::styled("  in/out  ", Style::new().fg(Color::DarkGray)),
-        Span::raw(format!(
-            "{}/{}",
-            state.status.total_input_tokens, state.status.total_output_tokens
-        )),
-    ]));
-    text.push_line(Line::from(vec![
-        Span::styled("cost     ", Style::new().fg(Color::Green).bold()),
-        Span::raw(format!("${:.4}", state.status.total_cost)),
-    ]));
+
     frame.render_widget(
         Paragraph::new(text).style(Style::default().bg(state.theme.bg_status).fg(Color::White)),
         area,
@@ -457,7 +488,10 @@ fn input_pane(frame: &mut Frame, state: &AppState, area: Rect) {
     let mut lines: Vec<Line> = Vec::new();
     if state.input.is_empty() && !state.processing {
         lines.push(Line::from(vec![
-            Span::styled("Type a message...", Style::new().fg(Color::DarkGray)),
+            Span::styled(
+                "  Ask anything...  (/help for commands)",
+                Style::new().fg(Color::DarkGray),
+            ),
             cur,
         ]));
     } else {
@@ -478,6 +512,15 @@ fn input_pane(frame: &mut Frame, state: &AppState, area: Rect) {
             }
         }
     }
+    // Copilot-style keybinding hint bar.
+    if area.height >= 3 {
+        lines.push(Line::raw(""));
+        lines.push(Line::from(vec![Span::styled(
+            "  Enter send · Alt+Enter newline · Up/Down history · Esc quit",
+            Style::new().fg(Color::DarkGray),
+        )]));
+    }
+
     frame.render_widget(
         Paragraph::new(lines).style(Style::default().bg(state.theme.bg_input).fg(Color::White)),
         area,
