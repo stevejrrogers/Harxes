@@ -14,6 +14,7 @@ pub enum ToolId {
     Edit,
     Grep,
     Glob,
+    Delegate,
 }
 
 impl ToolId {
@@ -25,6 +26,7 @@ impl ToolId {
             ToolId::Edit => "Edit",
             ToolId::Grep => "Grep",
             ToolId::Glob => "Glob",
+            ToolId::Delegate => "Delegate",
         }
     }
     pub fn parse(name: &str) -> Option<ToolId> {
@@ -35,6 +37,7 @@ impl ToolId {
             "Edit" | "edit" => Some(ToolId::Edit),
             "Grep" | "grep" => Some(ToolId::Grep),
             "Glob" | "glob" => Some(ToolId::Glob),
+            "Delegate" | "delegate" => Some(ToolId::Delegate),
             _ => None,
         }
     }
@@ -49,6 +52,7 @@ pub enum ParsedArgs {
     Edit { path: String, old_string: String, new_string: String },
     Grep { needle: String, pattern: String, max_matches: usize },
     Glob { pattern: String, max_depth: Option<usize> },
+    Delegate { task: String, context: Option<String> },
 }
 
 /// The full set of tool specifications offered to the model.
@@ -91,6 +95,26 @@ pub fn all_tool_specs() -> Vec<ToolSpec> {
             "Glob",
             "List files matching a glob pattern (e.g. **/*.rs).",
             obj_schema(vec![("pattern", "string"), ("max_depth", "integer")]),
+        ),
+        ToolSpec::with_schema(
+            "Delegate",
+            "Delegate an independent sub-task to a fresh sub-agent that runs in its own context (separate window, same filesystem/shell), then returns a concise final result. Use for parallelizable or self-contained investigation tasks. Provide a self-contained task; optionally include a snippet of relevant context.",
+            {
+                let mut properties = serde_json::Map::new();
+                properties.insert(
+                    "task".to_string(),
+                    serde_json::json!({ "type": "string", "description": "Self-contained sub-task for the sub-agent" }),
+                );
+                properties.insert(
+                    "context".to_string(),
+                    serde_json::json!({ "type": "string", "description": "Optional relevant context snippet" }),
+                );
+                serde_json::json!({
+                    "type": "object",
+                    "properties": properties,
+                    "required": ["task"],
+                })
+            },
         ),
     ]
 }
@@ -173,6 +197,14 @@ pub fn parse_args(tool: ToolId, raw: &str) -> ParsedArgs {
                         max_depth,
                     };
                 }
+                ToolId::Delegate => {
+                    let task = obj.get("task").and_then(|x| x.as_str()).unwrap_or("");
+                    let context = obj.get("context").and_then(|x| x.as_str());
+                    return ParsedArgs::Delegate {
+                        task: task.to_string(),
+                        context: context.map(|s| s.to_string()),
+                    };
+                }
             }
         }
     }
@@ -209,6 +241,10 @@ pub fn parse_args(tool: ToolId, raw: &str) -> ParsedArgs {
             pattern: raw.trim().to_string(),
             max_depth: None,
         },
+        ToolId::Delegate => ParsedArgs::Delegate {
+            task: raw.trim().to_string(),
+            context: None,
+        },
     }
 }
 
@@ -240,6 +276,25 @@ mod tests {
         match parse_args(ToolId::Read, "src/main.rs") {
             ParsedArgs::Read { path } => assert_eq!(path, "src/main.rs"),
             _ => panic!(),
+        }
+    }
+
+    #[test]
+    fn parse_json_delegate_args() {
+        match parse_args(ToolId::Delegate, r#"{"task":"t","context":"c"}"#) {
+            ParsedArgs::Delegate { task, context } => {
+                assert_eq!(task, "t");
+                assert_eq!(context.as_deref(), Some("c"));
+            }
+            _ => panic!("expected delegate"),
+        }
+        // context is optional
+        match parse_args(ToolId::Delegate, r#"{"task":"only"}"#) {
+            ParsedArgs::Delegate { task, context } => {
+                assert_eq!(task, "only");
+                assert!(context.is_none());
+            }
+            _ => panic!("expected delegate"),
         }
     }
 }
