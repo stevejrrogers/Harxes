@@ -273,6 +273,19 @@ impl AgentLoop {
                 );
             }
         }
+        // Golden-diff review: if this overwrites an existing, different file and
+        // an interactive decider is present, show the exact change and require
+        // approval before writing.
+        if let Some(d) = &self.decider {
+            if let Ok(old) = self.fsys.read(path).await {
+                if old != content {
+                    let diff = harxes_core_domain::domain::services::diff::generate_diff(&old, content);
+                    if !d.decide_write_diff(path, &diff) {
+                        return format!("permission denied: diff to {path} was not approved");
+                    }
+                }
+            }
+        }
         match self.fsys.write(path, content).await {
             Ok(()) => format!("wrote {} bytes to {}", content.len(), path),
             Err(e) => format!("write error {e}"),
@@ -307,6 +320,19 @@ impl AgentLoop {
     async fn edit_file(&self, path: &str, old_string: &str, new_string: &str) -> String {
         if let Some(reason) = self.ensure_write_granted(path) {
             return format!("permission denied: {reason}");
+        }
+        // Golden-diff review: preview the single hunk before applying.
+        if let Some(d) = &self.decider {
+            if let Ok(old) = self.fsys.read(path).await {
+                if old.contains(old_string) {
+                    let new = old.replacen(old_string, new_string, 1);
+                    let diff =
+                        harxes_core_domain::domain::services::diff::generate_diff(&old, &new);
+                    if !d.decide_write_diff(path, &diff) {
+                        return format!("permission denied: edit to {path} was not approved");
+                    }
+                }
+            }
         }
         match self.fsys.replace(path, old_string, new_string).await {
             Ok(bytes) => format!("edited {path} ({bytes} bytes written)"),
@@ -374,8 +400,8 @@ impl AgentLoop {
                     };
                     match retry_after {
                         Some(ra) if attempt < max_retries => {
-                            let base = (250u64
-                                .saturating_mul(1 << attempt.min(5))) as u64;
+                            let base =
+                                250u64.saturating_mul(1 << attempt.min(5));
                             let wait = match ra {
                                 Some(secs) => base.max(secs * 1000),
                                 None => base,
@@ -729,6 +755,47 @@ mod tests {
 
         let ok = a.write_file_parts("/ok/a.txt", "hi").await;
         assert!(ok.starts_with("wrote"));
+    }
+
+    #[tokio::test]
+    async fn write_shows_golden_diff_and_consults_decider() {
+        use harxes_core_domain::ports::PermissionDecider;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        struct Capture(Arc<AtomicUsize>);
+        impl PermissionDecider for Capture {
+            fn decide_write(&self, _: &str) -> bool {
+                true
+            }
+            fn decide_bash(&self, _: &str) -> bool {
+                true
+            }
+            fn decide_write_diff(&self, _path: &str, diff: &str) -> bool {
+                // A real diff preview must have been produced.
+                assert!(
+                    diff.contains('-') || diff.contains('+'),
+                    "expected a golden diff, got: {diff}"
+                );
+                self.0.fetch_add(1, Ordering::SeqCst);
+                false // reject so we can observe the call
+            }
+        }
+
+        let calls = Arc::new(AtomicUsize::new(0));
+        let gate = Arc::new(Capture(calls.clone()));
+        let shell = Arc::new(FakeShell);
+        let fsys = Arc::new(FakeFs);
+        let llm = Arc::new(FakeLlmScript(Mutex::new(vec![])));
+        let a = AgentLoop::new(llm, shell, fsys).with_decider(gate);
+
+        // FakeFs::read returns "read:{path}" which differs from the write content,
+        // so the modification triggers a golden-diff review.
+        let out = a.write_file_parts("/x.txt", "some new content").await;
+        assert!(
+            out.contains("permission denied"),
+            "expected diff review to block, got: {out}"
+        );
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
     }
 
     #[tokio::test]

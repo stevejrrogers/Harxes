@@ -109,7 +109,11 @@ fn build_tools(tools: &[ToolSpec]) -> Vec<ToolDef<'_>> {
            function :FunctionDef{
                 name :&t.id ,
                  description :&t.description ,
-                  parameters :serde_json::json!({"type":"object","properties":{},"additionalProperties":true}),
+                  parameters : if t.input_schema.is_null() {
+                    serde_json::json!({"type":"object","properties":{},"additionalProperties":true})
+                  } else {
+                    t.input_schema.clone()
+                  },
             },
       }).collect()
 }

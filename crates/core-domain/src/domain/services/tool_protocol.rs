@@ -54,19 +54,63 @@ pub enum ParsedArgs {
 /// The full set of tool specifications offered to the model.
 pub fn all_tool_specs() -> Vec<ToolSpec> {
     vec![
-        ToolSpec::new("Bash", "Run a shell command and capture its output."),
-        ToolSpec::new("Read", "Read a file from disk by path."),
-        ToolSpec::new("Write", "Write content to a file on disk."),
-        ToolSpec::new(
+        ToolSpec::with_schema(
+            "Bash",
+            "Run a shell command and capture its output.",
+            obj_schema(vec![("command", "string")]),
+        ),
+        ToolSpec::with_schema(
+            "Read",
+            "Read a file from disk by path.",
+            obj_schema(vec![("path", "string")]),
+        ),
+        ToolSpec::with_schema(
+            "Write",
+            "Write content to a file on disk.",
+            obj_schema(vec![("path", "string"), ("content", "string")]),
+        ),
+        ToolSpec::with_schema(
             "Edit",
             "Replace a unique old_string with new_string inside an existing file (surgical edit).",
+            obj_schema(vec![
+                ("path", "string"),
+                ("old_string", "string"),
+                ("new_string", "string"),
+            ]),
         ),
-        ToolSpec::new(
+        ToolSpec::with_schema(
             "Grep",
             "Search files for a pattern (regular expression or plain text) under a glob path.",
+            obj_schema(vec![
+                ("needle", "string"),
+                ("pattern", "string"),
+                ("max_matches", "integer"),
+            ]),
         ),
-        ToolSpec::new("Glob", "List files matching a glob pattern (e.g. **/*.rs)."),
+        ToolSpec::with_schema(
+            "Glob",
+            "List files matching a glob pattern (e.g. **/*.rs).",
+            obj_schema(vec![("pattern", "string"), ("max_depth", "integer")]),
+        ),
     ]
+}
+
+/// Build a JSON-Schema object with properties of the given types, all required.
+///
+/// `props` is a list of `(name, jsonschema_type)` pairs (e.g. `"string"`,
+/// `"integer"`). The schema declares every property as required.
+fn obj_schema(props: Vec<(&'static str, &'static str)>) -> serde_json::Value {
+    let mut properties = serde_json::Map::new();
+    let mut required = Vec::new();
+    for (name, ty) in props {
+        required.push(serde_json::Value::String(name.to_string()));
+        properties.insert(name.to_string(), serde_json::json!({ "type": ty }));
+    }
+    serde_json::json!({
+        "type": "object",
+        "properties": properties,
+        "required": required,
+    })
 }
 
 /// Parse raw tool-call arguments into a typed payload. Model arguments may be

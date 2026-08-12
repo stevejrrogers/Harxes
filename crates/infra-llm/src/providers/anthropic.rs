@@ -6,31 +6,14 @@ use harxes_core_domain::ports::{AgentResponse, LlmError, LlmPort, StreamSink};
 use serde::Serialize;
 
 #[derive(Serialize)]
-struct ApiMessage {
-    role: String,
-    content: String,
-}
-
-impl From<&Message> for ApiMessage {
-    fn from(m: &Message) -> Self {
-        let role = match m.role {
-            Role::System | Role::User | Role::Tool => "user".to_string(),
-            Role::Assistant => "assistant".to_string(),
-        };
-        Self {
-            role,
-            content: m.content.clone(),
-        }
-    }
-}
-
-#[derive(Serialize)]
 struct RequestBody<'a> {
     model: &'a str,
     max_tokens: u32,
     system: Option<&'a str>,
-    messages: Vec<ApiMessage>,
+    messages: serde_json::Value,
     temperature: Option<f64>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    tools: Vec<serde_json::Value>,
 }
 
 #[derive(serde::Deserialize)]
@@ -44,6 +27,10 @@ struct ContentBlock {
     #[serde(rename = "type")]
     kind: String,
     text: Option<String>,
+    /// Present for `tool_use` blocks.
+    id: Option<String>,
+    name: Option<String>,
+    input: Option<serde_json::Value>,
 }
 
 #[derive(serde::Deserialize)]
@@ -53,6 +40,76 @@ struct Usage {
 }
 
 const DEFAULT_MAX_TOKENS: u32 = 4096;
+
+/// Encode the transcript into the Anthropic `messages` payload. The first
+/// System message is carried in the dedicated `system` field and skipped here;
+/// later System messages (e.g. a compressed context summary) are kept as
+/// user-role content so they are never dropped. Assistant tool requests become
+/// `tool_use` content blocks and tool results become `tool_result` blocks.
+fn encode_messages(messages: &[Message]) -> serde_json::Value {
+    let mut saw_system = false;
+    let arr: Vec<serde_json::Value> = messages
+        .iter()
+        .filter(|m| {
+            if m.role == Role::System && !saw_system {
+                saw_system = true;
+                return false;
+            }
+            true
+        })
+        .map(|m| {
+            let role = match m.role {
+                Role::Assistant => "assistant",
+                _ => "user",
+            };
+            let content = match m.role {
+                Role::Assistant if !m.tool_calls.is_empty() => {
+                    let mut blocks: Vec<serde_json::Value> = Vec::new();
+                    if !m.content.is_empty() {
+                        blocks.push(serde_json::json!({ "type": "text", "text": m.content }));
+                    }
+                    for tc in &m.tool_calls {
+                        let input = serde_json::from_str(&tc.arguments)
+                            .unwrap_or_else(|_| serde_json::json!({}));
+                        blocks.push(serde_json::json!({
+                            "type": "tool_use",
+                            "id": tc.id,
+                            "name": tc.name,
+                            "input": input,
+                        }));
+                    }
+                    serde_json::Value::Array(blocks)
+                }
+                Role::Tool => serde_json::json!([{
+                    "type": "tool_result",
+                    "tool_use_id": m.tool_call_id.clone().unwrap_or_default(),
+                    "content": m.content,
+                }]),
+                _ => serde_json::Value::String(m.content.clone()),
+            };
+            serde_json::json!({ "role": role, "content": content })
+        })
+        .collect();
+    serde_json::Value::Array(arr)
+}
+
+/// Encode tool declarations into the Anthropic `tools` payload.
+fn encode_tools(tools: &[ToolSpec]) -> Vec<serde_json::Value> {
+    tools
+        .iter()
+        .map(|t| {
+            serde_json::json!({
+                "name": t.id,
+                "description": t.description,
+                "input_schema": if t.input_schema.is_null() {
+                    serde_json::json!({ "type": "object" })
+                } else {
+                    t.input_schema.clone()
+                },
+            })
+        })
+        .collect()
+}
 
 /// Anthropic Messages API driven adapter.
 pub struct AnthropicClient {
@@ -84,37 +141,20 @@ impl LlmPort for AnthropicClient {
         provider: &ProviderId,
         model_id: &str,
         messages: &[Message],
-        _tools: &[ToolSpec],
+        tools: &[ToolSpec],
         temperature: Option<f64>,
     ) -> Result<AgentResponse, LlmError> {
         let system = messages
             .iter()
             .find(|m| m.role == Role::System)
             .map(|m| m.content.as_str());
-        // Anthropic: the first System message maps to the dedicated `system`
-        // field; any later System messages (e.g. a compressed context summary)
-        // are kept in the message list as user-role content so they are not lost.
-        let mut saw_system = false;
-        let api_messages: Vec<_> = messages
-            .iter()
-            .filter(|m| {
-                if m.role == Role::System {
-                    if !saw_system {
-                        saw_system = true;
-                        return false;
-                    }
-                }
-                true
-            })
-            .map(ApiMessage::from)
-            .collect();
-
         let body = RequestBody {
             model: model_id,
             max_tokens: DEFAULT_MAX_TOKENS,
             system,
-            messages: api_messages,
+            messages: encode_messages(messages),
             temperature,
+            tools: encode_tools(tools),
         };
 
         let resp = self
@@ -156,19 +196,37 @@ impl LlmPort for AnthropicClient {
 
         let text = rb
             .content
-            .into_iter()
+            .iter()
             .filter(|c| c.kind == "text")
-            .filter_map(|c| c.text)
+            .filter_map(|c| c.text.as_ref())
+            .cloned()
             .collect::<Vec<_>>()
             .join("\n");
 
-        Ok(AgentResponse::text(
-            text,
-            harxes_core_domain::domain::value_objects::TokenUsage::new(
+        let tool_calls: Vec<ToolCall> = rb
+            .content
+            .iter()
+            .filter(|c| c.kind == "tool_use")
+            .filter_map(|c| {
+                let id = c.id.clone()?;
+                let name = c.name.clone()?;
+                let input = c.input.clone().unwrap_or_else(|| serde_json::json!({}));
+                Some(ToolCall {
+                    id,
+                    name,
+                    arguments: input.to_string(),
+                })
+            })
+            .collect();
+
+        Ok(AgentResponse {
+            content: text,
+            usage: harxes_core_domain::domain::value_objects::TokenUsage::new(
                 rb.usage.input_tokens,
                 rb.usage.output_tokens,
             ),
-        ))
+            tool_calls,
+        })
     }
 
     async fn generate_stream(
@@ -176,7 +234,7 @@ impl LlmPort for AnthropicClient {
         _provider: &ProviderId,
         model_id: &str,
         messages: &[Message],
-        _tools: &[ToolSpec],
+        tools: &[ToolSpec],
         temperature: Option<f64>,
         sink: StreamSink,
     ) -> Result<AgentResponse, LlmError> {
@@ -187,30 +245,14 @@ impl LlmPort for AnthropicClient {
             .iter()
             .find(|m| m.role == Role::System)
             .map(|m| m.content.as_str());
-        let mut saw_system = false;
-        let api_messages: Vec<_> = messages
-            .iter()
-            .filter(|m| {
-                if m.role == Role::System {
-                    if !saw_system {
-                        saw_system = true;
-                        return false;
-                    }
-                }
-                true
-            })
-            .map(ApiMessage::from)
-            .collect();
 
         let body = serde_json::json!({
             "model": model_id,
             "max_tokens": DEFAULT_MAX_TOKENS,
             "stream": true,
             "system": system,
-            "messages": api_messages
-                .iter()
-                .map(|m| serde_json::json!({"role": m.role, "content": m.content}))
-                .collect::<Vec<_>>(),
+            "messages": encode_messages(messages),
+            "tools": encode_tools(tools),
             "temperature": temperature,
         });
 
@@ -377,5 +419,77 @@ impl LlmPort for AnthropicClient {
             ),
             tool_calls,
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use harxes_core_domain::domain::value_objects::ToolCall;
+    use serde_json::json;
+
+    fn simple_tools() -> Vec<ToolSpec> {
+        vec![ToolSpec::with_schema(
+            "Bash",
+            "Run a shell command.",
+            serde_json::json!({
+                "type": "object",
+                "properties": { "command": { "type": "string" } },
+                "required": ["command"]
+            }),
+        )]
+    }
+
+    #[test]
+    fn encode_tools_includes_name_description_and_schema() {
+        let tools = encode_tools(&simple_tools());
+        assert_eq!(tools.len(), 1);
+        let t = &tools[0];
+        assert_eq!(t["name"], "Bash");
+        assert_eq!(t["description"], "Run a shell command.");
+        assert_eq!(t["input_schema"]["required"][0], "command");
+    }
+
+    #[test]
+    fn encode_messages_emits_tool_use_block_for_assistant() {
+        let call = ToolCall {
+            id: "toolu_1".into(),
+            name: "Bash".into(),
+            arguments: json!({"command": "ls"}).to_string(),
+        };
+        let m = Message::assistant_with_tools(vec![call]);
+        let encoded = encode_messages(&[m]);
+        let arr = encoded.as_array().unwrap();
+        assert_eq!(arr.len(), 1);
+        assert_eq!(arr[0]["role"], "assistant");
+        let blocks = arr[0]["content"].as_array().unwrap();
+        assert_eq!(blocks.len(), 1);
+        assert_eq!(blocks[0]["type"], "tool_use");
+        assert_eq!(blocks[0]["id"], "toolu_1");
+        assert_eq!(blocks[0]["name"], "Bash");
+        assert_eq!(blocks[0]["input"]["command"], "ls");
+    }
+
+    #[test]
+    fn encode_messages_emits_tool_result_block_for_tool_role() {
+        let m = Message::tool_result("toolu_1", "ok");
+        let encoded = encode_messages(&[m]);
+        let arr = encoded.as_array().unwrap();
+        assert_eq!(arr[0]["role"], "user");
+        let blocks = arr[0]["content"].as_array().unwrap();
+        assert_eq!(blocks[0]["type"], "tool_result");
+        assert_eq!(blocks[0]["tool_use_id"], "toolu_1");
+        assert_eq!(blocks[0]["content"], "ok");
+    }
+
+    #[test]
+    fn first_system_message_goes_to_system_field_and_is_skipped() {
+        let sys = Message::new(Role::System, "you are the agent");
+        let user = Message::new(Role::User, "hi");
+        let encoded = encode_messages(&[sys, user]);
+        let arr = encoded.as_array().unwrap();
+        // Only the user message remains; the first System was lifted to `system`.
+        assert_eq!(arr.len(), 1);
+        assert_eq!(arr[0]["role"], "user");
     }
 }

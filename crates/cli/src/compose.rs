@@ -310,6 +310,10 @@ impl harxes_core_domain::ports::PermissionDecider for GateDecider {
     fn decide_bash(&self, command: &str) -> bool {
         self.0.request(&format!("run bash \"{command}\""))
     }
+    fn decide_write_diff(&self, path: &str, diff: &str) -> bool {
+        self.0
+            .request(&format!("apply diff to {path}\n\n{diff}"))
+    }
 }
 
 #[cfg(test)]

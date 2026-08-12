@@ -7,3 +7,4 @@ edition.workspace = true
 harxes-core-domain = { path = "../core-domain" }
 tokio       = { workspace = true }
 async-trait   = { workspace = true }
+libc        = "0.2"
