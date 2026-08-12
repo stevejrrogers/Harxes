@@ -33,6 +33,10 @@ pub struct LiveToolObserver {
     /// uses this to avoid re-printing the fully-rendered answer after the live
     /// stream already showed the text.
     pub streamed: Arc<AtomicBool>,
+    /// Optional sender for live text deltas. When set (TUI mode), each streaming
+    /// token is forwarded for per-token typewriter rendering instead of being
+    /// printed to stdout.
+    pub deltas: Option<std::sync::mpsc::Sender<String>>,
 }
 impl ToolObserver for LiveToolObserver {
     fn on_tool_start(&self, name: &str, args_preview: &str) {
@@ -63,6 +67,10 @@ impl ToolObserver for LiveToolObserver {
     fn on_stream_delta(&self, text: &str) {
         self.streamed.store(true, std::sync::atomic::Ordering::Relaxed);
         if std::env::var("HARXES_TUI").is_ok() {
+            // In TUI mode, forward the delta for live rendering.
+            if let Some(tx) = &self.deltas {
+                let _ = tx.send(text.to_string());
+            }
             return;
         }
         use std::io::Write as _;

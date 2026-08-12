@@ -175,7 +175,11 @@ pub struct Wiring {
 
 /// Assemble a fully-wired agent for the given (optional) provider id. The CLI
 /// receives the agent through the [`AgentPort`] abstraction, not a concrete type.
-pub fn assemble(cli_provider: Option<&str>, cli_base_url: Option<&str>) -> Result<Wiring, String> {
+pub fn assemble(
+    cli_provider: Option<&str>,
+    cli_base_url: Option<&str>,
+    stream_delta_sink: Option<std::sync::mpsc::Sender<String>>,
+) -> Result<Wiring, String> {
     let pid = match cli_provider {
         Some(p) => p.to_string(),
         None => default_provider_id(),
@@ -193,6 +197,7 @@ pub fn assemble(cli_provider: Option<&str>, cli_base_url: Option<&str>) -> Resul
     let observer = crate::ui::LiveToolObserver {
         active: active_tools.clone(),
         streamed: streamed.clone(),
+        deltas: stream_delta_sink.clone(),
     };
     let approval_gate = Arc::new(ApprovalGate::default());
     let decider = Arc::new(GateDecider(approval_gate.clone()));

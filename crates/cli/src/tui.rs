@@ -128,6 +128,10 @@ pub struct AppState {
     pub plan: Vec<TaskItem>,
     /// Pane background theme (dark or light).
     pub theme: PaneTheme,
+    /// True while the current turn's text is arriving via live streaming.
+    pub streaming_turn: bool,
+    /// Accumulated streamed text of the current turn (authoritative final text).
+    pub live_text: String,
 }
 
 impl AppState {
@@ -161,6 +165,8 @@ impl AppState {
             approval_prompt: None,
             plan: vec![],
             theme: PaneTheme::dark(),
+            streaming_turn: false,
+            live_text: String::new(),
         }
     }
 
@@ -680,6 +686,8 @@ pub fn run(
                         cancel_turn();
                         state.typing_text.clear();
                         state.typing_shown = 0;
+                        state.streaming_turn = false;
+                        state.live_text.clear();
                         state.scroll = 0;
                         state.auto_scroll = true;
                         state

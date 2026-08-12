@@ -52,7 +52,14 @@ struct Cli {
 
 fn main() {
     let cli = Cli::parse();
-    let wiring = match compose::assemble(cli.provider.as_deref(), cli.base_url.as_deref()) {
+    // Cross-thread channel for live streaming text deltas (per-token typing in
+    // the TUI). Only the interactive REPL drains the receiver.
+    let (stream_delta_tx, stream_delta_rx) = std::sync::mpsc::channel::<String>();
+    let wiring = match compose::assemble(
+        cli.provider.as_deref(),
+        cli.base_url.as_deref(),
+        Some(stream_delta_tx),
+    ) {
         Ok(w) => w,
         Err(e) => {
             eprintln!("harxes : {e}");
@@ -86,7 +93,7 @@ fn main() {
         run_one_shot(&wiring, &cli, &prompt);
         return;
     }
-    run_repl(&wiring, &cli);
+    run_repl(&wiring, &cli, stream_delta_rx);
 }
 
 fn resolve_model(wiring: &compose::Wiring, cli: &Cli) -> String {
@@ -141,7 +148,11 @@ fn run_one_shot(wiring: &compose::Wiring, cli: &Cli, prompt: &str) {
     }
 }
 
-fn run_repl(wiring: &compose::Wiring, cli: &Cli) {
+fn run_repl(
+    wiring: &compose::Wiring,
+    cli: &Cli,
+    stream_delta_rx: std::sync::mpsc::Receiver<String>,
+) {
     let pid = make_pid(wiring);
     let model = resolve_model(wiring, cli);
     let session_id = match &cli.resume {
@@ -566,6 +577,15 @@ fn run_repl(wiring: &compose::Wiring, cli: &Cli) {
             *turn_slot.lock().unwrap() = Some(jh);
         },
         |st| {
+            // Drain live streaming deltas first so the typewriter reveals text
+            // as the model emits it (per-token), before any completed-turn batch.
+            while let Ok(delta) = stream_delta_rx.try_recv() {
+                if !delta.is_empty() {
+                    st.streaming_turn = true;
+                    st.live_text.push_str(&delta);
+                    st.typing_text = st.live_text.clone();
+                }
+            }
             // Surface any outstanding approval request for the user to answer.
             st.approval_prompt = wiring.approval_gate.has_pending();
             while let Ok(ev) = rx.try_recv() {
@@ -573,6 +593,9 @@ fn run_repl(wiring: &compose::Wiring, cli: &Cli) {
                     Ok((lines, in_tok, out_tok, new_hist)) => {
                         for l in lines {
                             match l {
+                                // If the live stream already surfaced the text,
+                                // don't re-type it from the completed batch.
+                                tui::ChatLine::Agent(_txt) if st.streaming_turn => {}
                                 tui::ChatLine::Agent(txt) => {
                                     st.typing_text = txt;
                                     st.typing_shown = 0;
@@ -597,6 +620,9 @@ fn run_repl(wiring: &compose::Wiring, cli: &Cli) {
                             .join(" ");
                         st.plan_auto_tick(&combined);
                         st.processing = false;
+                        // Turn complete: stop live-stream mode for the next turn.
+                        st.streaming_turn = false;
+                        st.live_text.clear();
                     }
                     Err(e) => {
                         st.lines.push(tui::ChatLine::Agent(format!("error: {e}")));
