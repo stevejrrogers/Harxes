@@ -2,6 +2,7 @@
 //! turn dividers and syntax highlighting for code blocks.
 
 use harxes_core_domain::ports::ToolObserver;
+use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, Mutex, OnceLock};
 
 /// ANSI color helper wrapping raw escape codes.
@@ -28,6 +29,10 @@ impl C {
 /// mirrors the currently-executing tools into a shared buffer the TUI renders.
 pub struct LiveToolObserver {
     pub active: Arc<Mutex<Vec<String>>>,
+    /// Set to true once any streaming delta has been surfaced. The one-shot CLI
+    /// uses this to avoid re-printing the fully-rendered answer after the live
+    /// stream already showed the text.
+    pub streamed: Arc<AtomicBool>,
 }
 impl ToolObserver for LiveToolObserver {
     fn on_tool_start(&self, name: &str, args_preview: &str) {
@@ -45,6 +50,26 @@ impl ToolObserver for LiveToolObserver {
         );
     }
     fn on_tool_result(&self, _name: &str, _result_preview: &str) {}
+    fn on_retry(&self, wait_secs: u64) {
+        if std::env::var("HARXES_TUI").is_ok() {
+            return;
+        }
+        println!(
+            "{} transient error — retrying in {}s",
+            C::yellow("⟳"),
+            C::dim(&wait_secs.to_string())
+        );
+    }
+    fn on_stream_delta(&self, text: &str) {
+        self.streamed.store(true, std::sync::atomic::Ordering::Relaxed);
+        if std::env::var("HARXES_TUI").is_ok() {
+            return;
+        }
+        use std::io::Write as _;
+        let mut out = std::io::stdout().lock();
+        let _ = out.write_all(text.as_bytes());
+        let _ = out.flush();
+    }
 }
 
 fn ctx() -> (

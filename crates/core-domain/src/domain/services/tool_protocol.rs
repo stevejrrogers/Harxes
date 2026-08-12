@@ -11,6 +11,9 @@ pub enum ToolId {
     Bash,
     Read,
     Write,
+    Edit,
+    Grep,
+    Glob,
 }
 
 impl ToolId {
@@ -19,6 +22,9 @@ impl ToolId {
             ToolId::Bash => "Bash",
             ToolId::Read => "Read",
             ToolId::Write => "Write",
+            ToolId::Edit => "Edit",
+            ToolId::Grep => "Grep",
+            ToolId::Glob => "Glob",
         }
     }
     pub fn parse(name: &str) -> Option<ToolId> {
@@ -26,6 +32,9 @@ impl ToolId {
             "Bash" | "bash" => Some(ToolId::Bash),
             "Read" | "read" => Some(ToolId::Read),
             "Write" | "write" => Some(ToolId::Write),
+            "Edit" | "edit" => Some(ToolId::Edit),
+            "Grep" | "grep" => Some(ToolId::Grep),
+            "Glob" | "glob" => Some(ToolId::Glob),
             _ => None,
         }
     }
@@ -37,6 +46,9 @@ pub enum ParsedArgs {
     Bash { command: String },
     Read { path: String },
     Write { path: String, content: String },
+    Edit { path: String, old_string: String, new_string: String },
+    Grep { needle: String, pattern: String, max_matches: usize },
+    Glob { pattern: String, max_depth: Option<usize> },
 }
 
 /// The full set of tool specifications offered to the model.
@@ -45,6 +57,15 @@ pub fn all_tool_specs() -> Vec<ToolSpec> {
         ToolSpec::new("Bash", "Run a shell command and capture its output."),
         ToolSpec::new("Read", "Read a file from disk by path."),
         ToolSpec::new("Write", "Write content to a file on disk."),
+        ToolSpec::new(
+            "Edit",
+            "Replace a unique old_string with new_string inside an existing file (surgical edit).",
+        ),
+        ToolSpec::new(
+            "Grep",
+            "Search files for a pattern (regular expression or plain text) under a glob path.",
+        ),
+        ToolSpec::new("Glob", "List files matching a glob pattern (e.g. **/*.rs)."),
     ]
 }
 
@@ -74,6 +95,40 @@ pub fn parse_args(tool: ToolId, raw: &str) -> ParsedArgs {
                         content: content.to_string(),
                     };
                 }
+                ToolId::Edit => {
+                    let path = obj.get("path").and_then(|x| x.as_str()).unwrap_or("");
+                    let old_string = obj.get("old_string").and_then(|x| x.as_str()).unwrap_or("");
+                    let new_string = obj.get("new_string").and_then(|x| x.as_str()).unwrap_or("");
+                    return ParsedArgs::Edit {
+                        path: path.to_string(),
+                        old_string: old_string.to_string(),
+                        new_string: new_string.to_string(),
+                    };
+                }
+                ToolId::Grep => {
+                    let needle = obj.get("needle").and_then(|x| x.as_str()).unwrap_or("");
+                    let pattern = obj
+                        .get("pattern")
+                        .and_then(|x| x.as_str())
+                        .unwrap_or("**/*");
+                    let max_matches = obj
+                        .get("max_matches")
+                        .and_then(|x| x.as_u64())
+                        .unwrap_or(100) as usize;
+                    return ParsedArgs::Grep {
+                        needle: needle.to_string(),
+                        pattern: pattern.to_string(),
+                        max_matches,
+                    };
+                }
+                ToolId::Glob => {
+                    let pattern = obj.get("pattern").and_then(|x| x.as_str()).unwrap_or(raw);
+                    let max_depth = obj.get("max_depth").and_then(|x| x.as_u64()).map(|d| d as usize);
+                    return ParsedArgs::Glob {
+                        pattern: pattern.to_string(),
+                        max_depth,
+                    };
+                }
             }
         }
     }
@@ -92,6 +147,24 @@ pub fn parse_args(tool: ToolId, raw: &str) -> ParsedArgs {
             };
             ParsedArgs::Write { path, content }
         }
+        ToolId::Edit => {
+            // Plain-string payloads are ambiguous; default to empty so the
+            // model is told to pass JSON (path/old_string/new_string).
+            ParsedArgs::Edit {
+                path: String::new(),
+                old_string: String::new(),
+                new_string: String::new(),
+            }
+        }
+        ToolId::Grep => ParsedArgs::Grep {
+            needle: raw.trim().to_string(),
+            pattern: "**/*".to_string(),
+            max_matches: 100,
+        },
+        ToolId::Glob => ParsedArgs::Glob {
+            pattern: raw.trim().to_string(),
+            max_depth: None,
+        },
     }
 }
 

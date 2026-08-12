@@ -166,6 +166,9 @@ pub struct Wiring {
     pub limits: LoopLimits,
     /// Live view of tools currently executing (shared with the TUI).
     pub active_tools: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
+    /// Set to true once the observer delivered at least one streaming delta
+    /// during a one-shot turn (the live stream already printed the text).
+    pub streamed: std::sync::Arc<std::sync::atomic::AtomicBool>,
     /// Interactive approval gate for dangerous operations.
     pub approval_gate: Arc<ApprovalGate>,
 }
@@ -186,8 +189,10 @@ pub fn assemble(cli_provider: Option<&str>, cli_base_url: Option<&str>) -> Resul
     let fsys = Arc::new(HostFileSystem);
     let active_tools: std::sync::Arc<std::sync::Mutex<Vec<String>>> =
         std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let streamed = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
     let observer = crate::ui::LiveToolObserver {
         active: active_tools.clone(),
+        streamed: streamed.clone(),
     };
     let approval_gate = Arc::new(ApprovalGate::default());
     let decider = Arc::new(GateDecider(approval_gate.clone()));
@@ -198,6 +203,7 @@ pub fn assemble(cli_provider: Option<&str>, cli_base_url: Option<&str>) -> Resul
             pid.clone(),
         )
         .with_decider(decider)
+        .with_streaming(true)
         .with_observer(Arc::new(observer)),
     );
     Ok(Wiring {
@@ -205,6 +211,7 @@ pub fn assemble(cli_provider: Option<&str>, cli_base_url: Option<&str>) -> Resul
         provider_id: pid.clone(),
         limits: LoopLimits::default(),
         active_tools,
+        streamed,
         approval_gate,
     })
 }
@@ -282,7 +289,6 @@ impl ApprovalGate {
     }
 
     /// Drop any pending requests (auto-deny so a blocked task can exit).
-    #[allow(dead_code)]
     pub fn cancel_all(&self) {
         let mut q = self.inner.lock().unwrap();
         for r in q.iter_mut() {

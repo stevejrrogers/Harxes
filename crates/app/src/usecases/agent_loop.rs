@@ -3,8 +3,10 @@
 
 use std::sync::Arc;
 
-use harxes_core_domain::domain::value_objects::{Message, ProviderId, Role, ToolCall};
-use harxes_core_domain::ports::{FileSystemPort, LlmError, LlmPort};
+use harxes_core_domain::domain::value_objects::{
+    Message, ProviderId, Role, ToolCall, ToolSpec,
+};
+use harxes_core_domain::ports::{AgentResponse, FileSystemPort, LlmError, LlmPort};
 
 /// Guardrail configuration for the agent loop.
 #[derive(Debug, Clone)]
@@ -45,6 +47,7 @@ pub struct AgentLoop {
     decider: Option<Arc<dyn harxes_core_domain::ports::PermissionDecider>>,
     session: Option<(Arc<dyn harxes_core_domain::ports::SessionStorePort>, String)>,
     observer: Option<Arc<dyn harxes_core_domain::ports::ToolObserver>>,
+    stream: bool,
 }
 
 impl AgentLoop {
@@ -61,6 +64,7 @@ impl AgentLoop {
             decider: None,
             session: None,
             observer: None,
+            stream: false,
         }
     }
 
@@ -98,21 +102,17 @@ impl AgentLoop {
         self
     }
 
+    /// Enable realtime streaming: text deltas are pushed to the observer as the
+    /// model generates, instead of only appearing when a turn completes. Falls
+    /// back to non-streaming for providers that cannot stream.
+    pub fn with_streaming(mut self, on: bool) -> Self {
+        self.stream = on;
+        self
+    }
+
     fn tool_specs() -> Vec<harxes_core_domain::domain::value_objects::ToolSpec> {
-        vec![
-            harxes_core_domain::domain::value_objects::ToolSpec::new(
-                "Bash",
-                "Run a shell command and return stdout/stderr/exit code.",
-            ),
-            harxes_core_domain::domain::value_objects::ToolSpec::new(
-                "Read",
-                "Read a file from disk and return its contents.",
-            ),
-            harxes_core_domain::domain::value_objects::ToolSpec::new(
-                "Write",
-                "Write content to a file on disk.",
-            ),
-        ]
+        use harxes_core_domain::domain::services::tool_protocol::all_tool_specs;
+        all_tool_specs()
     }
 
     async fn execute_call(&self, call: &ToolCall) -> String {
@@ -128,6 +128,19 @@ impl AgentLoop {
                 ParsedArgs::Bash { command } => self.run_bash(&command).await,
                 ParsedArgs::Read { path } => self.read_file(&path).await,
                 ParsedArgs::Write { path, content } => self.write_file_parts(&path, &content).await,
+                ParsedArgs::Edit {
+                    path,
+                    old_string,
+                    new_string,
+                } => self.edit_file(&path, &old_string, &new_string).await,
+                ParsedArgs::Grep {
+                    needle,
+                    pattern,
+                    max_matches,
+                } => self.grep(&needle, &pattern, max_matches).await,
+                ParsedArgs::Glob { pattern, max_depth } => {
+                    self.glob(&pattern, max_depth).await
+                }
             },
             None => format!("unknown tool '{}'", call.name),
         };
@@ -193,6 +206,52 @@ impl AgentLoop {
         }
     }
 
+    async fn grep(&self, needle: &str, pattern: &str, max_matches: usize) -> String {
+        use harxes_core_domain::ports::GrepMatch;
+        let needle = needle.trim();
+        if needle.is_empty() {
+            return "grep error: empty needle".to_string();
+        }
+        let pattern = if pattern.trim().is_empty() { "**/*" } else { pattern };
+        match self
+            .fsys
+            .grep(needle, pattern, max_matches.max(1))
+            .await
+        {
+            Ok(hits) if hits.is_empty() => format!("no matches for '{needle}'"),
+            Ok(hits) => {
+                // Group hits by path for a compact report.
+                let mut by_file: std::collections::BTreeMap<&str, Vec<&GrepMatch>> =
+                    std::collections::BTreeMap::new();
+                for h in &hits {
+                    by_file.entry(h.path.as_str()).or_default().push(h);
+                }
+                let mut out = String::new();
+                for (path, lines) in by_file {
+                    out.push_str(&format!("{path}:\n"));
+                    for h in lines {
+                        out.push_str(&format!("  {}: {}\n", h.line_number, h.line));
+                    }
+                }
+                out
+            }
+            Err(e) => format!("grep error {e}"),
+        }
+    }
+
+    async fn glob(&self, pattern: &str, max_depth: Option<usize>) -> String {
+        use harxes_core_domain::ports::GlobOptions;
+        let opts = GlobOptions {
+            max_depth,
+            ignore: vec![],
+        };
+        let files = self.fsys.glob(pattern, &opts).await;
+        if files.is_empty() {
+            return format!("no files match '{pattern}'");
+        }
+        files.join("\n")
+    }
+
     async fn write_file_parts(&self, path: &str, content: &str) -> String {
         if path.is_empty() {
             return "write error: empty path".to_string();
@@ -220,6 +279,120 @@ impl AgentLoop {
         }
     }
 
+    /// Consult the policy (and prompt decider) before a mutating filesystem
+    /// operation. Returns `Some(reason)` when the write should be blocked.
+    fn ensure_write_granted(&self, path: &str) -> Option<String> {
+        use harxes_core_domain::domain::value_objects::FsOp;
+        if path.is_empty() {
+            return Some("empty path".to_string());
+        }
+        let allowed = match &self.policy {
+            Some(p) => p.permits(FsOp::Write, path),
+            None => true,
+        };
+        if !allowed {
+            if let Some(d) = &self.decider {
+                if !d.decide_write(path) {
+                    return Some(format!("writing {path} was not approved"));
+                }
+            } else {
+                return Some(format!(
+                    "writing {path} is not in the allow list; no action taken"
+                ));
+            }
+        }
+        None
+    }
+
+    async fn edit_file(&self, path: &str, old_string: &str, new_string: &str) -> String {
+        if let Some(reason) = self.ensure_write_granted(path) {
+            return format!("permission denied: {reason}");
+        }
+        match self.fsys.replace(path, old_string, new_string).await {
+            Ok(bytes) => format!("edited {path} ({bytes} bytes written)"),
+            Err(e) => format!("edit error {e}"),
+        }
+    }
+
+    /// Call the LLM with exponential backoff on transient failures
+    /// (rate limits and 5xx-class transport errors), honoring the provider's
+    /// `retry_after` hint when present. Auth and timeout errors are terminal
+    /// and returned immediately. When streaming is enabled, text deltas are
+    /// pushed to the observer in real time.
+    async fn retry_generate(
+        &self,
+        provider_id: &ProviderId,
+        model_id: &str,
+        transcript: &[Message],
+        tools: &[ToolSpec],
+        max_retries: usize,
+    ) -> Result<AgentResponse, LlmError> {
+        use harxes_core_domain::ports::{LlmError as LE, StreamEvent, StreamSink};
+        // Build a sink forwarding text deltas to the observer when streaming.
+        let observer = self.observer.clone();
+        let sink: Option<StreamSink> = if self.stream {
+            Some(Arc::new(move |ev: StreamEvent| {
+                if let StreamEvent::Text(t) = ev {
+                    if let Some(obs) = &observer {
+                        obs.on_stream_delta(&t);
+                    }
+                }
+            }))
+        } else {
+            None
+        };
+
+        let mut attempt = 0usize;
+        loop {
+            let result = match &sink {
+                Some(s) => self
+                    .llm
+                    .generate_stream(
+                        provider_id,
+                        model_id,
+                        transcript,
+                        tools,
+                        None,
+                        s.clone(),
+                    )
+                    .await,
+                None => {
+                    self.llm
+                        .generate(provider_id, model_id, transcript, tools, None)
+                        .await
+                }
+            };
+            match result {
+                Ok(r) => return Ok(r),
+                Err(e) => {
+                    // Classify the error as retryable (rate limit / transient
+                    // 5xx-class request failure) or terminal.
+                    let retry_after = match &e {
+                        LE::RateLimited { retry_after } => Some(*retry_after),
+                        LE::Request(_) => Some(None),
+                        _ => None,
+                    };
+                    match retry_after {
+                        Some(ra) if attempt < max_retries => {
+                            let base = (250u64
+                                .saturating_mul(1 << attempt.min(5))) as u64;
+                            let wait = match ra {
+                                Some(secs) => base.max(secs * 1000),
+                                None => base,
+                            };
+                            if let Some(obs) = &self.observer {
+                                obs.on_retry(wait / 1000);
+                            }
+                            tokio::time::sleep(std::time::Duration::from_millis(wait)).await;
+                            attempt += 1;
+                        }
+                        _ => return Err(e),
+                    }
+                }
+            }
+        }
+    }
+
     /// Shared loop body: drive tool-calling turns over an existing transcript
     /// until a text-only turn or guardrails cut it off. Returns both the outcome
     /// and the final transcript so callers can carry conversation state.
@@ -242,17 +415,18 @@ impl AgentLoop {
                 truncated = true;
                 break;
             }
-            // Keep the transcript within the per-call window budget.
-            use harxes_core_domain::domain::value_objects::trim_to_budget;
+            // Keep the transcript within the per-call window budget, folding the
+            // oldest turns into a compact summary thread instead of a hard gap.
+            use harxes_core_domain::domain::value_objects::compress_transcript_to_budget;
             if !transcript.is_empty() {
-                transcript = trim_to_budget(
+                transcript = compress_transcript_to_budget(
                     std::mem::take(&mut transcript),
                     limits.context_window_tokens,
+                    Some(64),
                 );
             }
             let resp = self
-                .llm
-                .generate(provider_id, model_id, &transcript, &tools, None)
+                .retry_generate(provider_id, model_id, &transcript, &tools, 3)
                 .await?;
             total_tokens += resp.usage.total_tokens;
             total_input += resp.usage.input_tokens;
@@ -419,6 +593,29 @@ mod tests {
             let _ = (p, c);
             Ok(())
         }
+        async fn glob(
+            &self,
+            _p: &str,
+            _o: &harxes_core_domain::ports::GlobOptions,
+        ) -> Vec<String> {
+            vec!["a.rs".to_string()]
+        }
+        async fn grep(
+            &self,
+            _n: &str,
+            _p: &str,
+            _m: usize,
+        ) -> Result<Vec<harxes_core_domain::ports::GrepMatch>, FsError> {
+            Ok(vec![])
+        }
+        async fn replace(
+            &self,
+            _p: &str,
+            _o: &str,
+            _n: &str,
+        ) -> Result<usize, FsError> {
+            Ok(0)
+        }
     }
 
     fn agent(script: Vec<AgentResponse>) -> AgentLoop {
@@ -534,6 +731,27 @@ mod tests {
         assert!(ok.starts_with("wrote"));
     }
 
+    #[tokio::test]
+    async fn edit_respects_write_policy() {
+        use harxes_core_domain::domain::value_objects::PermissionPolicy;
+        let fsys = Arc::new(FakeFs);
+        let a = AgentLoop::new(
+            Arc::new(FakeLlmScript(Mutex::new(vec![]))),
+            Arc::new(FakeShell),
+            fsys,
+        )
+        .with_policy(PermissionPolicy {
+            allow_globs: vec!["/ok/**".to_string()],
+            deny_globs: vec![],
+        });
+
+        let blocked = a.edit_file("bad.txt", "a", "b").await;
+        assert!(blocked.contains("permission denied"));
+
+        let allowed = a.edit_file("/ok/x.txt", "old", "new").await;
+        assert!(allowed.contains("edited"));
+    }
+
     // E2E: a dangerous bash command is gated by the decider (returns denied).
     #[tokio::test]
     async fn dangerous_bash_is_gated_by_decider() {
@@ -612,5 +830,93 @@ mod tests {
         assert_eq!(res.outcome.iterations, 1);
         // transcript should include system + first user + second user + assistant reply
         assert!(res.transcript.iter().any(|m| m.content == "second"));
+    }
+
+    #[tokio::test]
+    async fn retry_generate_backs_off_once_then_succeeds() {
+        use harxes_core_domain::ports::{LlmError, ToolObserver};
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        struct Flaky(Arc<AtomicUsize>);
+        #[async_trait::async_trait]
+        impl LlmPort for Flaky {
+            async fn generate(
+                &self,
+                _p: &ProviderId,
+                _m: &str,
+                _msgs: &[Message],
+                _t: &[ToolSpec],
+                _tt: Option<f64>,
+            ) -> Result<AgentResponse, LlmError> {
+                let n = self.0.fetch_add(1, Ordering::SeqCst);
+                if n == 0 {
+                    Err(LlmError::RateLimited { retry_after: Some(0) })
+                } else {
+                    Ok(AgentResponse::text("recovered", Default::default()))
+                }
+            }
+        }
+
+        struct CountingRetries(Arc<AtomicUsize>);
+        impl ToolObserver for CountingRetries {
+            fn on_tool_start(&self, _: &str, _: &str) {}
+            fn on_tool_result(&self, _: &str, _: &str) {}
+            fn on_retry(&self, _: u64) {
+                self.0.fetch_add(1, Ordering::SeqCst);
+            }
+        }
+
+        let calls = Arc::new(AtomicUsize::new(0));
+        let retries = Arc::new(AtomicUsize::new(0));
+        let agent = AgentLoop::new(
+            Arc::new(Flaky(calls.clone())),
+            Arc::new(FakeShell),
+            Arc::new(FakeFs),
+        )
+        .with_observer(Arc::new(CountingRetries(retries.clone())));
+
+        let pid = ProviderId::new("x").unwrap();
+        let resp = agent
+            .retry_generate(&pid, "m", &[], &[], 3)
+            .await
+            .unwrap();
+        assert_eq!(resp.content, "recovered");
+        assert_eq!(calls.load(Ordering::SeqCst), 2, "should retry exactly once");
+        assert_eq!(retries.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn glob_tool_lists_files_and_grep_reports_no_match() {
+        use harxes_core_domain::ports::{GlobOptions, GrepMatch};
+        // Use a custom fs that reports glob hits and empty grep results.
+        struct FakeFs2;
+        #[async_trait::async_trait]
+        impl FileSystemPort for FakeFs2 {
+            async fn read(&self, p: &str) -> Result<String, FsError> {
+                Ok(format!("read:{p}"))
+            }
+            async fn write(&self, _p: &str, _c: &str) -> Result<(), FsError> {
+                Ok(())
+            }
+            async fn glob(&self, _p: &str, _o: &GlobOptions) -> Vec<String> {
+                vec!["crates/cli/src/main.rs".to_string(), "crates/app/src/lib.rs".to_string()]
+            }
+            async fn grep(&self, _n: &str, _p: &str, _m: usize) -> Result<Vec<GrepMatch>, FsError> {
+                Ok(vec![])
+            }
+            async fn replace(&self, _p: &str, _o: &str, _n: &str) -> Result<usize, FsError> {
+                Ok(0)
+            }
+        }
+
+        let a = AgentLoop::new(
+            Arc::new(FakeLlmScript(Mutex::new(vec![]))),
+            Arc::new(FakeShell),
+            Arc::new(FakeFs2),
+        );
+        let glob_out = a.glob("**/*.rs", None).await;
+        assert!(glob_out.contains("crates/cli/src/main.rs"));
+        let grep_out = a.grep("nothing", "**/*", 10).await;
+        assert!(grep_out.contains("no matches"));
     }
 }

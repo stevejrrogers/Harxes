@@ -8,16 +8,27 @@ compile sạch; `core-domain` không phụ thuộc infra.
 
 ---
 
+## Tổng quan
+
+Roadmap theo phase dưới đây. Trạng thái hiện tại đã vượt qua hầu hết mục trong
+Phase 1–5 (xem `docs/AGENTS.md`): adapter LLM Anthropic+OpenAI hoàn chỉnh (streaming SSE),
+tool-calling `AgentLoop` nhiều vòng, permission/approval gate, grep/glob/edit tools,
+context compress theo budget, retry/backoff, Ctrl-C cancel, TUI giàu (markdown hiển thị,
+status/cost panel, plan checklist, session resume). Phần còn hở được ghi ở AGENTS.md.
+
 ## Baseline (hiện tại)
 
-- **core-domain**: entities (`Agent`, `Tool`, `ToolKind`), value objects (`Message`, `Role`, `ProviderId`, `ModelId`, `TokenUsage`), ports (`LlmPort`, `ShellPort`, `FileSystemPort`, `ConfigStorePort`, `SecretsVaultPort`)
-- **app**: usecase duy nhất `AgentRunner::run_turn()` (1 lượt LLM); service static `ProviderRegistry` (Anthropic + OpenAI)
-- **infra-shell**: stub -> tokio command shell
-- **infra-auth**: đọc API key từ env vars
-- **infra-session**: config JSON trên disk
-- **cli**: chỉ in banner, chưa wiring
-
-Thiếu: không có `.git`; chưa adapter LLM thật; Shell/Fs chưa implement; không streaming, không tool-loop.
+- **core-domain**: entities + value objects — `Message`, `Role`, `ProviderId`, `ModelId`,
+  `TokenUsage`, `ContextBudget`; ports — `LlmPort`, `ShellPort`, `FileSystemPort` (read/write/replace/glob/grep),
+  `ConfigStorePort`, `SecretsVaultPort`, `SessionStorePort`, `PermissionDecider`, `ToolObserver`
+  (on_tool_start/result, on_retry, on_stream_delta).
+- **app**: usecase `AgentLoop` — tool-calling loop nhiều vòng, retry/backoff, context compress,
+  streaming; `LoopLimits` guardrail (iteration cap, token cap).
+- **infra-llm**: adapter Anthropic + OpenAI (`generate` + `generate_stream` SSE).
+- **infra-fs**: `HostFileSystem` (read/write/replace/glob/grep, skip dirs lớn).
+- **infra-shell**: tokio command shell; **infra-auth** env keys; **infra-session** JSON store.
+- **cli**: TUI (ratatui) + one-shot prompt; composition root `compose.rs`.
+- Workspace compile sạch, toàn bộ test pass; repo có commit đầy đủ trên `main`.
 
 ---
 

@@ -8,6 +8,7 @@ harxes-core-domain = { path = "../core-domain" }
 serde      = { workspace = true }
 thiserror  = { workspace = true }
 async-trait= { workspace = true }
+tokio      = { workspace = true }
 
 [dev-dependencies]
 tokio      = { workspace = true }

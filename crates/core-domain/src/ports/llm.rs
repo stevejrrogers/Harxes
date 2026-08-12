@@ -1,3 +1,5 @@
+use std::sync::Arc;
+
 use async_trait::async_trait;
 
 use crate::domain::value_objects::{Message, ProviderId, TokenUsage, ToolCall, ToolSpec};
@@ -9,6 +11,18 @@ pub struct AgentResponse {
     /// Tool-call requests from the model (empty for a plain text turn).
     pub tool_calls: Vec<ToolCall>,
 }
+
+/// A unit of streaming output emitted as a provider streams its reply.
+#[derive(Debug, Clone)]
+pub enum StreamEvent {
+    /// A chunk of generated text (may be a partial word).
+    Text(String),
+    /// A tool-call request materialized during streaming.
+    ToolCall(ToolCall),
+}
+
+/// Sink to which a provider pushes streaming events.
+pub type StreamSink = Arc<dyn Fn(StreamEvent) + Send + Sync>;
 
 impl AgentResponse {
     pub fn text(content: impl Into<String>, usage: TokenUsage) -> Self {
@@ -63,4 +77,29 @@ pub trait LlmPort: Send + Sync {
         tools: &[ToolSpec],
         temperature: Option<f64>,
     ) -> Result<AgentResponse, LlmError>;
+
+    /// Generate a turn while pushing streaming [`StreamEvent`]s into `sink`
+    /// (used for realtime "typing" feedback). The default implementation is a
+    /// non-streaming fallback: it calls [`LlmPort::generate`] and emits the
+    /// whole text as a single event. Providers that support SSE override this.
+    ///
+    /// The returned [`AgentResponse`] is authoritative and always carries the
+    /// complete content + tool calls; streaming events are a progressive view.
+    async fn generate_stream(
+        &self,
+        provider: &ProviderId,
+        model_id: &str,
+        messages: &[Message],
+        tools: &[ToolSpec],
+        temperature: Option<f64>,
+        sink: StreamSink,
+    ) -> Result<AgentResponse, LlmError> {
+        let resp = self
+            .generate(provider, model_id, messages, tools, temperature)
+            .await?;
+        if !resp.content.is_empty() {
+            sink(StreamEvent::Text(resp.content.clone()));
+        }
+        Ok(resp)
+    }
 }

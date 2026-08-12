@@ -648,6 +648,7 @@ pub fn run(
     state: &mut AppState,
     mut on_command: impl FnMut(&mut AppState, String),
     mut poll_events: impl FnMut(&mut AppState),
+    mut cancel_turn: impl FnMut(),
 ) -> Result<(), Box<dyn std::error::Error>> {
     let mut terminal = match ratatui::try_init() {
         Ok(t) => t,
@@ -676,6 +677,14 @@ pub fn run(
                 {
                     if state.processing {
                         state.processing = false;
+                        cancel_turn();
+                        state.typing_text.clear();
+                        state.typing_shown = 0;
+                        state.scroll = 0;
+                        state.auto_scroll = true;
+                        state
+                            .lines
+                            .push(ChatLine::Tool(String::from("⛔ cancelled")));
                     } else {
                         break;
                     }

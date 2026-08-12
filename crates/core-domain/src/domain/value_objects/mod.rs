@@ -6,7 +6,10 @@ mod provider_id;
 mod token_usage;
 mod tool_call;
 
-pub use context_window::{estimate_tokens, message_tokens, transcript_tokens, trim_to_budget};
+pub use context_window::{
+    compress_transcript_to_budget, estimate_tokens, message_tokens, transcript_tokens,
+    trim_to_budget,
+};
 pub use message::{Message, Role};
 pub use model_id::{InvalidModelId, ModelId};
 pub use permission::{FsOp, PermissionPolicy};

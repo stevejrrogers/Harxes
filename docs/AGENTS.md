@@ -2,57 +2,76 @@
 
 > Trạng thái dự án + hướng đi tiếp. Cập nhật khi có milestone mới.
 
-## TL;DR (đứng giữa Phase 0 → Phase 1)
+## TL;DR
 
 `harxes` là CLI coding agent (như Claude Code) viết bằng Rust, kiến trúc hexagonal
-qua Cargo workspace. **Repo chưa có commit đầu tiên** (branch `main` rỗng) — mọi file
-đang ở trạng thái added/staged từ lần tạo repo ban đầu.
+qua Cargo workspace. Repo đã có lịch sử commit đầy đủ trên `main`; cả workspace
+compile sạch và toàn bộ test pass.
 
-## Hiện trạng cụ thể
+Các vòng phát triển gần nhất (từ sau khi hướng tới "ngon hơn Claude/Copilot") đã bổ
+sung: **Grep/Glob/Edit tools**, **context compression** theo budget, **retry/backoff**,
+**streaming output realtime (SSE)** cho Anthropic + OpenAI, và **Ctrl-C cancel** cho
+turn đang chạy trong TUI.
 
-- **core-domain / app / infra-auth / infra-shell / infra-session**: baseline hoàn chỉnh và compile sạch (`cargo build`, ~77 crates).
-- **infra-llm**: đang viết dở adapter LLM trong `crates/infra-llm/src/providers/`
-  - Thư mục này là **untracked**.
-  - `lib.rs` hiện chỉ có doc comment, **chưa khai báo `pub mod providers;`**
-    → toàn bộ code trong `providers/*.rs` KHÔNG được compile hiện tại.
-  - `anthropic.rs`: gần hoàn chỉnh nhưng chưa tham gia module tree.
-  - `openai.rs`: **bị cắt ngang** (kết thúc giữa hàm ở cuối file, thiếu phần parse response) — cần viết lại phần đuôi.
-- Mâu thuẫn đường dẫn chưa xử lý: `ProviderDescriptor.base_url` ở registry đã chứa full path
-  (`.../v1/messages`, `.../v1/chat/completions`) nhưng adapter Anthropic tự append `/v1/messages`,
-  adapter OpenAI tự append `/home/v1/...`. Nếu wire thẳng sẽ ra double-path → cần chọn một chuẩn
-  duy nhất (khuyến nghị: adapter nhận thẳng full endpoint URL, không tự nối thêm path).
+## Kho crates
 
-## Hướng đi tiếp (Phase làm trong session này)
+- `core-domain` — (dependency-free) entities + value objects (`Message`, `Role`,
+  `ProviderId`, `ModelId`, `TokenUsage`, `ContextBudget`…), ports
+  (`LlmPort`, `ShellPort`, `FileSystemPort`, `ConfigStorePort`, `SecretsVaultPort`,
+  `SessionStorePort`, `PermissionDecider`, `ToolObserver`).
+- `app` — usecase `AgentLoop` (tool-calling loop nhiều vòng, retry, context compress,
+  streaming). Phụ thuộc port, không phụ thuộc infra.
+- `infra-llm` — adapter Anthropic + OpenAI (`generate` non-stream + `generate_stream` SSE).
+- `infra-fs` — `HostFileSystem`: read/write/replace (Edit) + glob + grep.
+- `infra-shell` — tokio command shell.
+- `infra-auth` / `infra-session` — env keys / JSON session store.
+- `cli` — TUI (ratatui) + one-shot prompt, composition root (`compose.rs`).
 
-Theo `docs/ROADMAP.md`:
+## Những gì đã implement trong session này (tăng "ngon hơn Claude/Copilot")
 
-### Phase 1 — REPL + one-shot prompt
-1. Hoàn thiện adapter LLM Anthropic + OpenAI qua HTTP (`reqwest`) — map roles ↔ provider format,
-   parse content + token usage, timeout/xử lý lỗi (RateLimited/Auth).
-2. Bật module: thêm `pub mod providers;` vào `lib.rs`.
-3. Composition root trong `cli/main.rs`: vault env → registry → llm adapter → AgentRunner builder
-   (hiện main chỉ in banner "skeleton built successfully.").
-4. CLI args bằng clap: subcommand nhận prompt one-shot.
-5. Streaming output kiểu gõ dần + in token usage cuối lượt.
+### Search tools (Grep + Glob)
+- `FileSystemPort::grep(re, path, options)` → `Vec<GrepMatch>`; `glob(pattern, path)` → `Vec<String>`.
+- `infra-fs` bỏ qua các thư mục lớn: `.git`, `target`, `node_modules`, v.v.
 
-Demo target:
-```bash
-$ harxes "Giải thích hexagon pattern ngắn gọn"
-harxes > [streaming...] Hệ hexagonal...
-usage ~= in 500 / out 120 · anthropic/claude-sonnet-4-5
-```
+### Edit tool
+- `FileSystemPort::replace(old, new, path)`; tool `Edit` trong `tool_protocol.rs`.
+- `parse_args` xử lý JSON-object args và fallback plain-string.
 
-### Lưu ý kỹ thuật khi làm tiếp
-- Port chi phối là `LlmPort::generate()` ở core-domain; muốn streaming realtime cần quyết định cách
-  truyền callback/Sink loạt delta mà vẫn giữ object-safe (`Arc<dyn LlmPort>`).
-- Đảm bảo compile clean sau từng bước.
+### Context window quản lý theo budget
+- `compress_transcript_to_budget(transcript, budget)` — fold các turn cũ thành một
+  `System` summary compact, giữ lại những content mới nhất.
+- Anthropic adapter **giữ** các System message không phải đầu tiên (map thành role user,
+  không bị filter drop) — quan trọng để summary compress không mất.
 
-## Nguyên tắc xuyên suốt (trích ROADMAP)
+### Retry / backoff
+- `retry_generate` trong `AgentLoop`: transient error thì backoff rồi thử lại; báo qua
+  `ToolObserver::on_retry(secs)`.
+
+### Streaming output (realtime)
+- `LlmPort::generate_stream(..., StreamSink)`; `StreamSink = Arc<dyn Fn(StreamEvent) + Send + Sync>`.
+  Mặc định delegate về `generate` (vẫn object-safe); provider hỗ trợ override.
+- Anthropic: SSE `message_start` / `content_block_delta(text_delta)` /
+  `content_block_stop(tool_use)` / `message_delta`.
+- OpenAI: SSE `choices[0].delta.content` + `delta.tool_calls[]` (BTreeMap theo index), `include_usage`.
+- CLI: one-shot bật streaming — text in gõ dần; TUI nhận final text.
+- Chú ý: Anthropic adapter chưa pass `tools` lên API (giới hạn có sẵn từ trước).
+
+### Ctrl-C cancel (TUI)
+- `tui::run` nhận thêm callback `cancel_turn`; khi `state.processing` và bấm Ctrl-C →
+  abort `JoinHandle` của turn đang chạy + `ApprovalGate::cancel_all()` để thả worker đang
+  chờ approval. Hiển thị dòng `⛔ cancelled`, quay lại prompt. Ctrl-C khi idle → thoát app.
+
+## Những việc/chỗ còn hở
+
+- TUI chưa live-refresh streaming theo từng delta (chỉ hiển thị final text sau khi xong);
+  delta đang được dùng cho one-shot CLI.
+- Bash child process có thể không bị kill trọn vẹn khi abort mid-run (tokio `Child` drop
+  không kill process mặc định).
+- OpenAI một số model gửi `delta.reasoning_content` — chưa xử lý, chỉ consume content.
+- Chưa test streaming chạy thật với API live.
+
+## Nguyên tắc xuyên suốt
+
 - Mỗi phase ra binary chạy được; có test đơn vị cho core-domain/app.
-- core-domain sạch dependency infra; app phụ thuộc port, infra implement port.
-- Sau Phase 2 luôn có guardrails an toàn (iteration cap, token cap).
-
----
-
-*Note này được tạo vì các output trước đó của agent liên tiếp bị hỏng/thành văn bản rác —
-thêm một file note để future agents nắm trạng thái mà không cần re-derive.*
+- `core-domain` sạch dependency infra; `app` phụ thuộc port; `infra-*` implement port.
+- Guardrails an toàn (iteration cap, token cap) được duy trì trong AgentLoop.

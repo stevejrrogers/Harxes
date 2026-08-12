@@ -105,13 +105,17 @@ fn run_one_shot(wiring: &compose::Wiring, cli: &Cli, prompt: &str) {
     let model = resolve_model(wiring, cli);
     match tokio::runtime::Runtime::new() {
         Ok(rt) => rt.block_on(async {
+            wiring.streamed.store(false, std::sync::atomic::Ordering::Relaxed);
             match wiring
                 .agent
                 .run(&pid, &model, "You are Harxes.", prompt, &wiring.limits)
                 .await
             {
                 Ok(out) => {
-                    println!("{}", ui::render_assistant(&out.final_text));
+                    // If the live stream already printed the text, don't re-print it.
+                    if !wiring.streamed.load(std::sync::atomic::Ordering::Relaxed) {
+                        println!("{}", ui::render_assistant(&out.final_text));
+                    }
                     if out.truncated_by_guardrail {
                         eprintln!(
                             "{}",
@@ -185,6 +189,9 @@ fn run_repl(wiring: &compose::Wiring, cli: &Cli) {
     // Project-scoped agent context: agents write/re-read state under `<cwd>/.harxes`.
     let ctx_store = ContextStore::new(std::path::PathBuf::from(".harxes"));
     let handle = rt.handle().clone();
+    // Handle of the in-flight turn task, so a Ctrl-C can abort it mid-turn.
+    let turn_handle: std::sync::Arc<std::sync::Mutex<Option<tokio::task::JoinHandle<()>>>> =
+        std::sync::Arc::new(std::sync::Mutex::new(None));
 
     state
         .lines
@@ -540,7 +547,8 @@ fn run_repl(wiring: &compose::Wiring, cli: &Cli) {
             let history_snapshot = trx.borrow().clone();
             let txc = tx.clone();
             let handle2 = handle.clone();
-            handle2.spawn(async move {
+            let turn_slot = turn_handle.clone();
+            let jh = handle2.spawn(async move {
                 let r = run_turn_owned(
                     agent,
                     pid_str,
@@ -555,6 +563,7 @@ fn run_repl(wiring: &compose::Wiring, cli: &Cli) {
                 .await;
                 let _ = txc.send(r);
             });
+            *turn_slot.lock().unwrap() = Some(jh);
         },
         |st| {
             // Surface any outstanding approval request for the user to answer.
@@ -594,6 +603,23 @@ fn run_repl(wiring: &compose::Wiring, cli: &Cli) {
                         st.processing = false;
                     }
                 }
+            }
+        },
+        || {
+            // At the end of a cancelled turn, ensure the approval gate isn't
+            // left blocked (a worker may be parked on a pending request).
+            let aborted = if let Ok(mut slot) = turn_handle.lock() {
+                if let Some(jh) = slot.take() {
+                    jh.abort();
+                    true
+                } else {
+                    false
+                }
+            } else {
+                false
+            };
+            if aborted {
+                wiring.approval_gate.cancel_all();
             }
         },
     );

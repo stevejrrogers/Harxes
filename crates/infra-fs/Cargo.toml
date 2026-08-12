@@ -7,3 +7,5 @@ edition.workspace = true
 harxes-core-domain = { path = "../core-domain" }
 async-trait   = { workspace = true }
 tokio         = { workspace = true }
+glob          = "0.3"
+regex         = "1"
