@@ -4,7 +4,7 @@ version.workspace = true
 edition.workspace = true
 
 [dependencies]
-harxes-core-domain = { path = "../core-domain" }
+harxes-core-domain = { path = "../../core-domain" }
 tokio       = { workspace = true }
 async-trait   = { workspace = true }
 libc        = "0.2"

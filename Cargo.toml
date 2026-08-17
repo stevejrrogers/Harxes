@@ -4,11 +4,11 @@ members = [
     "crates/cli",
     "crates/core-domain",
     "crates/app",
-    "crates/infra-shell",
-    "crates/infra-llm",
-    "crates/infra-session",
-    "crates/infra-auth",
-    "crates/infra-fs",
+    "crates/infrastructure/shell",
+    "crates/infrastructure/llm",
+    "crates/infrastructure/session",
+    "crates/infrastructure/auth",
+    "crates/infrastructure/fs",
 ]
 
 [workspace.package]

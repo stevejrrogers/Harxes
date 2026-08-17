@@ -6,11 +6,11 @@ edition.workspace = true
 [dependencies]
 harxes-core-domain  = { path = "../core-domain" }
 harxes-app          = { path = "../app" }
-harxes-infra-shell  = { path = "../infra-shell" }
-harxes-infra-llm    = { path = "../infra-llm" }
-harxes-infra-session= { path = "../infra-session" }
-harxes-infra-auth   = { path = "../infra-auth" }
-harxes-infra-fs     = { path = "../infra-fs" }
+harxes-infra-shell  = { path = "../infrastructure/shell" }
+harxes-infra-llm    = { path = "../infrastructure/llm" }
+harxes-infra-session= { path = "../infrastructure/session" }
+harxes-infra-auth   = { path = "../infrastructure/auth" }
+harxes-infra-fs     = { path = "../infrastructure/fs" }
 
 [dependencies.clap]
 workspace = true
