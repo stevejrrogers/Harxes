@@ -24,9 +24,9 @@ status/cost panel, plan checklist, session resume). Phần còn hở được gh
   (on_tool_start/result, on_retry, on_stream_delta).
 - **app**: usecase `AgentLoop` — tool-calling loop nhiều vòng, retry/backoff, context compress,
   streaming; `LoopLimits` guardrail (iteration cap, token cap).
-- **infra-llm**: adapter Anthropic + OpenAI (`generate` + `generate_stream` SSE).
-- **infra-fs**: `HostFileSystem` (read/write/replace/glob/grep, skip dirs lớn).
-- **infra-shell**: tokio command shell; **infra-auth** env keys; **infra-session** JSON store.
+- **infrastructure/llm**: adapter Anthropic + OpenAI (`generate` + `generate_stream` SSE).
+- **infrastructure/fs**: `HostFileSystem` (read/write/replace/glob/grep, skip dirs lớn).
+- **infrastructure/shell**: tokio command shell; **infrastructure/auth** env keys; **infrastructure/session** JSON store.
 - **cli**: TUI (ratatui) + one-shot prompt; composition root `compose.rs`.
 - Workspace compile sạch, toàn bộ test pass; repo có commit đầy đủ trên `main`.
 
@@ -35,7 +35,7 @@ status/cost panel, plan checklist, session resume). Phần còn hở được gh
 ## Phase 1 — REPL chạy được + one-shot prompt
 
 Tasks:
-1. Adapter LLM Anthropic + OpenAI bằng HTTP client (`reqwest`) trong infra-llm: map roles ↔ provider format; parse content + token usage; timeout.
+1. Adapter LLM Anthropic + OpenAI bằng HTTP client (`reqwest`) trong `infrastructure/llm`: map roles ↔ provider format; parse content + token usage; timeout.
 2. Composition root trong cli/main.rs: vault env → registry → llm adapter → AgentRunner builder.
 3. CLI args clap: subcommand mặc định nhận prompt one-shot.
 4. Streaming output dạng gõ dần, in token usage cuối lượt.

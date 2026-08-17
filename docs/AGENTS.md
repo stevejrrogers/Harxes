@@ -21,17 +21,19 @@ turn đang chạy trong TUI.
   `SessionStorePort`, `PermissionDecider`, `ToolObserver`).
 - `app` — usecase `AgentLoop` (tool-calling loop nhiều vòng, retry, context compress,
   streaming). Phụ thuộc port, không phụ thuộc infra.
-- `infra-llm` — adapter Anthropic + OpenAI (`generate` non-stream + `generate_stream` SSE).
-- `infra-fs` — `HostFileSystem`: read/write/replace (Edit) + glob + grep.
-- `infra-shell` — tokio command shell.
-- `infra-auth` / `infra-session` — env keys / JSON session store.
+- `infrastructure/*` — các adapter implement port (mỗi cái là một package riêng
+  `harxes-infra-*`, gom trong thư mục container `crates/infrastructure/`):
+  - `infrastructure/llm` — adapter Anthropic + OpenAI (`generate` non-stream + `generate_stream` SSE).
+  - `infrastructure/fs` — `HostFileSystem`: read/write/replace (Edit) + glob + grep.
+  - `infrastructure/shell` — tokio command shell.
+  - `infrastructure/auth` / `infrastructure/session` — env keys / JSON session store.
 - `cli` — TUI (ratatui) + one-shot prompt, composition root (`compose.rs`).
 
 ## Những gì đã implement trong session này (tăng "ngon hơn Claude/Copilot")
 
 ### Search tools (Grep + Glob)
 - `FileSystemPort::grep(re, path, options)` → `Vec<GrepMatch>`; `glob(pattern, path)` → `Vec<String>`.
-- `infra-fs` bỏ qua các thư mục lớn: `.git`, `target`, `node_modules`, v.v.
+- `infrastructure/fs` bỏ qua các thư mục lớn: `.git`, `target`, `node_modules`, v.v.
 
 ### Edit tool
 - `FileSystemPort::replace(old, new, path)`; tool `Edit` trong `tool_protocol.rs`.
@@ -73,5 +75,5 @@ turn đang chạy trong TUI.
 ## Nguyên tắc xuyên suốt
 
 - Mỗi phase ra binary chạy được; có test đơn vị cho core-domain/app.
-- `core-domain` sạch dependency infra; `app` phụ thuộc port; `infra-*` implement port.
+- `core-domain` sạch dependency infra; `app` phụ thuộc port; `infrastructure/*` (`harxes-infra-*`) implement port.
 - Guardrails an toàn (iteration cap, token cap) được duy trì trong AgentLoop.

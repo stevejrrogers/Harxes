@@ -6,14 +6,14 @@
 
 ## Nguyên tắc xuyên suốt
 - Mỗi milestone kết thúc bằng **binary chạy được** (`cargo run`).
-- `core-domain` SẠCH dependency infra; `app` chỉ phụ thuộc port; `infra-*` implement port.
+- `core-domain` SẠCH dependency infra; `app` chỉ phụ thuộc port; `infrastructure/*` (`harxes-infra-*`) implement port.
 - Docs đi kèm mỗi milestone vào `docs/{architecture,guides,patterns}`.
 - **Chuẩn base_url đã chốt:** adapter nhận **full endpoint URL** (không tự append path).
   Registry/LiteLLM descriptor chứa full path; adapter dùng thẳng, không nối thêm `/v1/...`.
 
 ---
 
-## Milestone 0 — Hoàn thiện baseline (fix double-path + infra-llm)
+## Milestone 0 — Hoàn thiện baseline (fix double-path + infrastructure/llm)
 Trước khi có binary chạy được, phải làm cho workspace compile sạch toàn bộ.
 
 1. **Fix double-path base_url**
@@ -22,8 +22,8 @@ Trước khi có binary chạy được, phải làm cho workspace compile sạc
    - **Sửa:** adapter nhận full URL từ registry/config; xoá đoạn tự nối path trong
      `AnthropicClient::url()` / `OpenAiClient::url()`. Chỉ giữ base host trim nếu cần.
 
-2. **Hoàn thiện infra-llm**
-   - Thêm `pub mod providers;` vào `crates/infra-llm/src/lib.rs`.
+2. **Hoàn thiện infrastructure/llm**
+   - Thêm `pub mod providers;` vào `crates/infrastructure/llm/src/lib.rs`.
    - Viết lại phần đuôi cắt ngang của `openai.rs` (parse ResponseBody -> AgentResponse + TokenUsage),
      align với pattern anthropic.rs.
    - Kiểm tra map role cả 2 provider.
@@ -72,11 +72,11 @@ Bước lớn nhất để "giống Claude Code".
    - Chuyển static ProviderRegistry sang factory có capability detection:
      provider nào hỗ trợ tool-use, format tool-call ra sao.
 
-3. **Adapter shell hoàn chỉnh** (infra-shell implement ShellPort)
+3. **Adapter shell hoàn chỉnh** (infrastructure/shell implement ShellPort)
    - Spawn `/bin/sh -c <cmd>` qua tokio process; stream stdout/stderr realtime;
      timeout configurable; return CommandOutput{stdout,stderr,exit_status}.
 
-4. **Adapter filesystem hoàn chỉnh** (infra-fs implement FileSystemPort)
+4. **Adapter filesystem hoàn chỉnh** (infrastructure/fs implement FileSystemPort)
    - Read/write file với error mapping chuẩn FsError (NotFound/PermissionDenied/Io).
 
 5. **Usecase agent-loop** trong app layer:
@@ -133,7 +133,7 @@ Tiếp tục theo ROADMAP Phase 4+5 cho retry/cancel/diff-review/TUI rich render
 ## Trạng thái triển khai (sẽ update)
 | Milestone | Trạng thái |
 |---|---|
-| M0 Fix baseline + infra-llm | ✅ DONE |
+| M0 Fix baseline + infrastructure/llm | ✅ DONE |
 | M1 REPL one-shot streamed | ✅ DONE |
 | M2 Tool-calling loop + guardrails | ✅ DONE |
 | M3 LiteLLM proxy support | ✅ DONE |
@@ -141,9 +141,9 @@ Tiếp tục theo ROADMAP Phase 4+5 cho retry/cancel/diff-review/TUI rich render
 
 ## Ghi chú triển khai
 - **20 unit test** pass toàn workspace, clippy clean, `cargo build` xanh.
-- Thêm crate mới: `harxes-infra-fs` (`HostFileSystem` implement `FileSystemPort`).
-- `infra-shell`: `TokioCommandShell` spawn `/bin/sh -c <cmd>` với timeout.
-- `infra-session`: thêm `JsonSessionStore` lưu transcript JSON.
+- Thêm crate mới: `harxes-infra-fs` (`crates/infrastructure/fs`, `HostFileSystem` implement `FileSystemPort`).
+- `infrastructure/shell`: `TokioCommandShell` spawn `/bin/sh -c <cmd>` với timeout.
+- `infrastructure/session`: thêm `JsonSessionStore` lưu transcript JSON.
 - AgentLoop: multi-turn tool-loop (Bash/Read/Write), guardrails (iteration 25 / token 128k),
   context manager trim turn cũ, permission policy gate write ops, session persist.
 
