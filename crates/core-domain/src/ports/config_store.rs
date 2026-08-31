@@ -8,12 +8,26 @@ pub struct ProviderConfig {
     pub api_key_env: String,
 }
 
+/// USD pricing per million tokens for one model (substring-matched by id).
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize)]
+pub struct ModelPricing {
+    pub input_per_mtok: f64,
+    pub output_per_mtok: f64,
+}
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct HarxesConfig {
     pub active_provider: Option<String>,
     /// provider_id -> config
     #[serde(default)]
     pub providers: std::collections::BTreeMap<String, ProviderConfig>,
+    /// Shell-command allow/deny rules (see `CommandPolicy`): allow skips the
+    /// approval prompt for risky commands, deny refuses outright.
+    #[serde(default)]
+    pub commands: crate::domain::value_objects::CommandPolicy,
+    /// Cost-estimate overrides: model-id substring -> USD per million tokens.
+    #[serde(default)]
+    pub pricing: std::collections::BTreeMap<String, ModelPricing>,
 }
 
 /// Driven port (hexagonal): persistence of user preferences (which provider is

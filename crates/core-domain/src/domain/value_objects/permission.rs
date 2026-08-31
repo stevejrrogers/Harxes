@@ -75,6 +75,84 @@ fn star(p: &[u8], t: &[u8]) -> bool {
     dp[np][nt]
 }
 
+/// Verdict for a shell command against the configured [`CommandPolicy`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CommandVerdict {
+    /// Explicitly allowed: run without prompting, even if heuristically risky.
+    Allow,
+    /// Explicitly denied: refuse without prompting.
+    Deny,
+    /// No rule matched: fall back to the default gating (prompt when risky).
+    Ask,
+}
+
+/// User-configured allow/deny rules for shell commands, matched against the
+/// full command string. Patterns support `*` wildcards (e.g. `cargo *`,
+/// `git status`); a pattern without `*` also matches as a word-boundary
+/// prefix (`git` matches `git log` but not `gitk`). Deny takes precedence.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct CommandPolicy {
+    #[serde(default)]
+    pub allow: Vec<String>,
+    #[serde(default)]
+    pub deny: Vec<String>,
+}
+
+impl CommandPolicy {
+    pub fn evaluate(&self, cmd: &str) -> CommandVerdict {
+        let c = cmd.trim();
+        if self.deny.iter().any(|p| matches_command(p, c)) {
+            return CommandVerdict::Deny;
+        }
+        if self.allow.iter().any(|p| matches_command(p, c)) {
+            return CommandVerdict::Allow;
+        }
+        CommandVerdict::Ask
+    }
+}
+
+fn matches_command(pattern: &str, cmd: &str) -> bool {
+    let p = pattern.trim();
+    if p.is_empty() {
+        return false;
+    }
+    if p.contains('*') {
+        return star(p.as_bytes(), cmd.as_bytes());
+    }
+    cmd == p || cmd.starts_with(&format!("{p} "))
+}
+
+#[cfg(test)]
+mod command_tests {
+    use super::*;
+
+    #[test]
+    fn wildcard_and_prefix_matching() {
+        let pol = CommandPolicy {
+            allow: vec!["cargo *".into(), "git status".into(), "ls".into()],
+            deny: vec!["rm -rf /*".into(), "sudo *".into()],
+        };
+        assert_eq!(pol.evaluate("cargo test --workspace"), CommandVerdict::Allow);
+        assert_eq!(pol.evaluate("git status"), CommandVerdict::Allow);
+        assert_eq!(pol.evaluate("ls -la"), CommandVerdict::Allow);
+        assert_eq!(pol.evaluate("git push"), CommandVerdict::Ask);
+        assert_eq!(pol.evaluate("sudo rm x"), CommandVerdict::Deny);
+        assert_eq!(pol.evaluate("rm -rf /etc"), CommandVerdict::Deny);
+        // word-boundary: "ls" must not match "lsof"
+        assert_eq!(pol.evaluate("lsof -i"), CommandVerdict::Ask);
+    }
+
+    #[test]
+    fn deny_beats_allow() {
+        let pol = CommandPolicy {
+            allow: vec!["git *".into()],
+            deny: vec!["git push *".into(), "git push".into()],
+        };
+        assert_eq!(pol.evaluate("git log"), CommandVerdict::Allow);
+        assert_eq!(pol.evaluate("git push origin main"), CommandVerdict::Deny);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

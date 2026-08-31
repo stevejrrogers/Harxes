@@ -217,7 +217,10 @@ pub fn assemble(
         .with_decider(decider)
         .with_streaming(true)
         .with_observer(Arc::new(observer))
-        .with_todos(todos.clone()),
+        .with_todos(todos.clone())
+        .with_command_policy(
+            JsonConfigStore::new(default_config_dir()).load().commands,
+        ),
     );
     Ok(Wiring {
         agent,

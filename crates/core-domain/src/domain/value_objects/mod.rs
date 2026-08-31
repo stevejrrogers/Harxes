@@ -13,7 +13,7 @@ pub use context_window::{
 };
 pub use message::{Message, Role};
 pub use model_id::{InvalidModelId, ModelId};
-pub use permission::{FsOp, PermissionPolicy};
+pub use permission::{CommandPolicy, CommandVerdict, FsOp, PermissionPolicy};
 pub use provider_id::{InvalidProviderId, ProviderId};
 pub use token_usage::TokenUsage;
 pub use todo::{normalize_todos, render_todos, TodoAction, TodoItem, TodoStatus};

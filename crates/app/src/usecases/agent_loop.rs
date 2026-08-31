@@ -53,6 +53,8 @@ pub struct AgentLoop {
     delegation_depth: usize,
     /// Shared plan/todo list the agent can manage with the `Todo` tool.
     todos: Option<Arc<std::sync::Mutex<Vec<harxes_core_domain::domain::value_objects::TodoItem>>>>,
+    /// User-configured shell-command allow/deny rules.
+    command_policy: harxes_core_domain::domain::value_objects::CommandPolicy,
 }
 
 impl AgentLoop {
@@ -72,7 +74,17 @@ impl AgentLoop {
             stream: false,
             delegation_depth: 0,
             todos: None,
+            command_policy: Default::default(),
         }
+    }
+
+    /// Attach user-configured shell-command allow/deny rules.
+    pub fn with_command_policy(
+        mut self,
+        p: harxes_core_domain::domain::value_objects::CommandPolicy,
+    ) -> Self {
+        self.command_policy = p;
+        self
     }
 
     /// Attach a file-permission policy gating mutating tool operations.
@@ -186,10 +198,19 @@ impl AgentLoop {
 
     async fn run_bash(&self, cmd: &str) -> String {
         use harxes_core_domain::ports::ShellExitStatus;
-        if Self::is_dangerous(cmd) {
-            if let Some(d) = &self.decider {
-                if !d.decide_bash(cmd) {
-                    return format!("permission denied: '{cmd}' was not approved");
+        use harxes_core_domain::domain::value_objects::CommandVerdict;
+        match self.command_policy.evaluate(cmd) {
+            CommandVerdict::Deny => {
+                return format!("permission denied: '{cmd}' is blocked by the configured command deny list");
+            }
+            CommandVerdict::Allow => {}
+            CommandVerdict::Ask => {
+                if Self::is_dangerous(cmd) {
+                    if let Some(d) = &self.decider {
+                        if !d.decide_bash(cmd) {
+                            return format!("permission denied: '{cmd}' was not approved");
+                        }
+                    }
                 }
             }
         }
@@ -427,6 +448,7 @@ impl AgentLoop {
             // Sub-agents do not touch the parent's plan: delegated tasks are a
             // single step from the parent's perspective.
             todos: None,
+            command_policy: self.command_policy.clone(),
         };
         let limits = LoopLimits {
             max_iterations: 15,

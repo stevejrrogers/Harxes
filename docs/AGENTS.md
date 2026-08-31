@@ -65,8 +65,16 @@ turn đang chạy trong TUI.
 
 ## Những việc/chỗ còn hở
 
-- Bảng giá `estimate_cost` còn thô (flat per-token, thiếu model mới) — cân nhắc
-  tách giá input/output và cho phép override qua config.
+- (trống — các gap trước đã đóng; thêm mục mới tại đây khi phát hiện)
+
+## Config nâng cao (`~/.harxes/config.json`)
+
+- `commands.allow` / `commands.deny`: rule allow/deny cho Bash tool, match theo
+  wildcard `*` hoặc word-boundary prefix (vd `"cargo *"`, `"git status"`).
+  Deny thắng allow; allow bỏ qua approval prompt cho lệnh nguy hiểm; deny từ
+  chối thẳng không hỏi.
+- `pricing`: override giá ước tính — map substring của model id →
+  `{ "input_per_mtok": USD, "output_per_mtok": USD }`.
 
 (Đã đóng: TUI live streaming — commit 62304cb; Bash child kill khi abort — process
 group + RAII guard trong `infrastructure/shell`; `reasoning_content` — fallback khi

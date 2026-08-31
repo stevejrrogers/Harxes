@@ -14,7 +14,7 @@ use harxes_app::ports::agent::AgentPort;
 use harxes_core_domain::domain::value_objects::{Message, ProviderId, Role};
 use harxes_core_domain::ports::{SessionRecord, SessionStorePort};
 use harxes_infra_fs::context::ContextStore;
-use harxes_infra_session::JsonSessionStore;
+use harxes_infra_session::{JsonConfigStore, JsonSessionStore};
 use std::sync::Arc;
 
 /// Harxes — a Rust coding agent harness.
@@ -300,7 +300,7 @@ fn run_repl(
                     rows.sort_by(|a, b| a.0.cmp(b.0));
                     let mut total = 0.0;
                     for (model, (i, o)) in rows {
-                        let c = estimate_cost(model, i + o);
+                        let c = estimate_cost(model, *i, *o);
                         total += c;
                         out.push_str(&format!(
                             "\n  {model}: {} (in {i} / out {o}) ~ ${c:.4}",
@@ -308,7 +308,7 @@ fn run_repl(
                         ));
                     }
                     if total == 0.0 {
-                        total = estimate_cost(&st.status.model, t);
+                        total = estimate_cost(&st.status.model, ti, to);
                     }
                     out.push_str(&format!("\nestimated cost: ${total:.4}"));
                     st.lines.push(tui::ChatLine::Agent(out));
@@ -733,10 +733,15 @@ fn run_repl(
                         st.status.total_output_tokens += out_tok;
                         st.status.total_tokens += tok;
                         let m = st.status.model.clone();
-                        let e = st.status.per_model.entry(m.clone()).or_insert((0, 0));
+                        let e = st.status.per_model.entry(m).or_insert((0, 0));
                         e.0 += in_tok;
                         e.1 += out_tok;
-                        st.status.total_cost = estimate_cost(&m, st.status.total_tokens);
+                        st.status.total_cost = st
+                            .status
+                            .per_model
+                            .iter()
+                            .map(|(model, (i, o))| estimate_cost(model, *i, *o))
+                            .sum();
                         *trx.borrow_mut() = new_hist;
                         // Auto-tick plan items whose key words appeared.
                         let combined: String = trx
@@ -792,12 +797,16 @@ fn run_repl(
             state.status.total_output_tokens
         );
         for (model, (i, o)) in rows {
-            let c = estimate_cost(model, i + o);
+            let c = estimate_cost(model, *i, *o);
             total += c;
             println!("  {model}: {} (in {i} / out {o}) ~ ${c:.4}", i + o);
         }
         if total == 0.0 {
-            total = estimate_cost(&state.status.model, state.status.total_tokens);
+            total = estimate_cost(
+                &state.status.model,
+                state.status.total_input_tokens,
+                state.status.total_output_tokens,
+            );
         }
         println!("estimated cost: ${total:.4}");
     }
@@ -979,15 +988,41 @@ fn welcome_banner() -> String {
     format!("{}\n\n  Harxes v{} — a Rust coding agent that plans, runs tools and remembers.\n  \n  Type a task below and press Enter, or use commands:\n  /plan <task>   break a task into a checklist\n  /theme         switch light/dark\n  /export F      save session (markdown or HTML)\n  /resume <id>   load a past session\n  /help          all commands", logo, env!("CARGO_PKG_VERSION"))
 }
 
-/// Rough per-1k-token pricing estimate (USD) for common models.
-fn estimate_cost(model: &str, tokens: u64) -> f64 {
-    let per_1k = match model.to_lowercase().as_str() {
-        m if m.contains("claude-sonnet") => 0.003,
-        m if m.contains("claude-opus") => 0.015,
-        m if m.contains("gpt-4o") => 0.0025,
-        _ => 0.001,
-    };
-    (tokens as f64) / 1000.0 * per_1k
+/// (input, output) USD per million tokens for a model id. Config `pricing`
+/// entries (substring-matched, loaded once) override the built-in table.
+fn model_pricing(model: &str) -> (f64, f64) {
+    use std::sync::OnceLock;
+    static OVERRIDES: OnceLock<
+        std::collections::BTreeMap<String, harxes_core_domain::ports::ModelPricing>,
+    > = OnceLock::new();
+    let overrides = OVERRIDES
+        .get_or_init(|| {
+            use harxes_core_domain::ports::ConfigStorePort;
+            JsonConfigStore::new(compose::default_config_dir()).load().pricing
+        });
+    let m = model.to_lowercase();
+    for (needle, p) in overrides {
+        if m.contains(&needle.to_lowercase()) {
+            return (p.input_per_mtok, p.output_per_mtok);
+        }
+    }
+    match m.as_str() {
+        s if s.contains("claude-opus") => (15.0, 75.0),
+        s if s.contains("claude-sonnet") => (3.0, 15.0),
+        s if s.contains("claude-haiku") => (0.8, 4.0),
+        s if s.contains("gpt-4o-mini") => (0.15, 0.6),
+        s if s.contains("gpt-4o") => (2.5, 10.0),
+        s if s.contains("deepseek") => (0.3, 1.2),
+        s if s.contains("glm") => (0.6, 2.2),
+        s if s.contains("qwen") => (0.4, 1.2),
+        _ => (0.5, 1.5),
+    }
+}
+
+/// Cost estimate (USD) with separate input/output pricing.
+fn estimate_cost(model: &str, in_tok: u64, out_tok: u64) -> f64 {
+    let (i, o) = model_pricing(model);
+    (in_tok as f64 * i + out_tok as f64 * o) / 1_000_000.0
 }
 
 #[cfg(test)]
