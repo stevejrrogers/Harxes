@@ -55,6 +55,8 @@ pub struct AgentLoop {
     todos: Option<Arc<std::sync::Mutex<Vec<harxes_core_domain::domain::value_objects::TodoItem>>>>,
     /// User-configured shell-command allow/deny rules.
     command_policy: harxes_core_domain::domain::value_objects::CommandPolicy,
+    /// Runtime-discovered tools (e.g. MCP servers), merged into the tool list.
+    dynamic_tools: Option<Arc<dyn harxes_core_domain::ports::DynamicToolPort>>,
 }
 
 impl AgentLoop {
@@ -75,7 +77,17 @@ impl AgentLoop {
             delegation_depth: 0,
             todos: None,
             command_policy: Default::default(),
+            dynamic_tools: None,
         }
+    }
+
+    /// Attach a provider of runtime-discovered tools (e.g. MCP servers).
+    pub fn with_dynamic_tools(
+        mut self,
+        d: Arc<dyn harxes_core_domain::ports::DynamicToolPort>,
+    ) -> Self {
+        self.dynamic_tools = Some(d);
+        self
     }
 
     /// Attach user-configured shell-command allow/deny rules.
@@ -138,9 +150,13 @@ impl AgentLoop {
         self
     }
 
-    fn tool_specs() -> Vec<harxes_core_domain::domain::value_objects::ToolSpec> {
+    fn tool_specs(&self) -> Vec<harxes_core_domain::domain::value_objects::ToolSpec> {
         use harxes_core_domain::domain::services::tool_protocol::all_tool_specs;
-        all_tool_specs()
+        let mut specs = all_tool_specs();
+        if let Some(d) = &self.dynamic_tools {
+            specs.extend(d.specs());
+        }
+        specs
     }
 
     async fn execute_call(
@@ -180,7 +196,12 @@ impl AgentLoop {
                 }
                 ParsedArgs::Todo { action, items } => self.handle_todo(action, items),
             },
-            None => format!("unknown tool '{}'", call.name),
+            None => match &self.dynamic_tools {
+                Some(d) if d.owns(call.name.as_str()) => {
+                    d.call(call.name.as_str(), call.arguments.as_str()).await
+                }
+                _ => format!("unknown tool '{}'", call.name),
+            },
         };
         if let Some(obs) = &self.observer {
             obs.on_tool_result(call.name.as_str(), &Self::preview(result.as_str(), 100));
@@ -449,6 +470,7 @@ impl AgentLoop {
             // single step from the parent's perspective.
             todos: None,
             command_policy: self.command_policy.clone(),
+            dynamic_tools: self.dynamic_tools.clone(),
         };
         let limits = LoopLimits {
             max_iterations: 15,
@@ -601,7 +623,7 @@ impl AgentLoop {
         mut transcript: Vec<Message>,
         limits: &LoopLimits,
     ) -> Result<(LoopOutcome, Vec<Message>), LlmError> {
-        let tools = Self::tool_specs();
+        let tools = self.tool_specs();
         let mut iterations = 0usize;
         // Plan-awareness tracking: nudge the model when it works for several
         // turns without touching an in-progress plan (Phase-2 "staleness nudge").

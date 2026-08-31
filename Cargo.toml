@@ -9,6 +9,7 @@ members = [
     "crates/infrastructure/session",
     "crates/infrastructure/auth",
     "crates/infrastructure/fs",
+    "crates/infrastructure/mcp",
 ]
 
 [workspace.package]

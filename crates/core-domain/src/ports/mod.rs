@@ -1,6 +1,7 @@
 #![allow(dead_code)]
 
 mod config_store;
+mod dynamic_tools;
 mod file_system;
 mod llm;
 mod permission_decider;
@@ -12,8 +13,10 @@ mod tool_observer;
 // Re-exports form the hexagonal "driven interface" surface that infrastructure
 // adapters implement and application services consume.
 pub use config_store::{
-    ConfigStoreError, ConfigStorePort, HarxesConfig, ModelPricing, ProviderConfig,
+    ConfigStoreError, ConfigStorePort, HarxesConfig, McpServerConfig, ModelPricing,
+    ProviderConfig,
 };
+pub use dynamic_tools::DynamicToolPort;
 pub use file_system::{FileSystemPort, FsError, GlobOptions, GrepMatch};
 pub use llm::{AgentResponse, LlmError, LlmPort, StreamEvent, StreamSink};
 pub use permission_decider::PermissionDecider;

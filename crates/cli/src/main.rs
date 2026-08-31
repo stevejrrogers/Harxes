@@ -244,6 +244,9 @@ fn run_repl(
     if state.lines.is_empty() {
         state.lines.push(tui::ChatLine::Agent(welcome_banner()));
     }
+    for s in &wiring.mcp_status {
+        state.lines.push(tui::ChatLine::Tool(s.clone()));
+    }
 
     let result = tui::run(
         &mut state,
@@ -287,7 +290,7 @@ fn run_repl(
             match t.as_str() {
                 "/help" => {
                     st.lines.push(tui::ChatLine::Agent(String ::from("/help      this help\n/clear     clear the screen\n/cost      total tokens used\n/model X   switch model\n/compact   summarize context\n/sessions  list saved sessions\n/remember X save a note to agent memory\n/resume I  load saved session by id\n/plan T    break task T into a checklist
-/theme D|L   switch light/dark theme\n/todo done N   tick item N on the plan\n/init      generate a HARXES.md project guide\n/export F  write transcript to file F.md\n/cost      tokens + estimated cost\n/exit      quit")));
+/theme D|L   switch light/dark theme\n/todo done N   tick item N on the plan\n/init      generate a HARXES.md project guide\n/mcp       list connected MCP servers and tools\n/export F  write transcript to file F.md\n/cost      tokens + estimated cost\n/exit      quit")));
                     return;
                 }
                 "/cost" => {
@@ -312,6 +315,21 @@ fn run_repl(
                     }
                     out.push_str(&format!("\nestimated cost: ${total:.4}"));
                     st.lines.push(tui::ChatLine::Agent(out));
+                    return;
+                }
+                "/mcp" => {
+                    if wiring.mcp_status.is_empty() {
+                        st.lines.push(tui::ChatLine::Tool(
+                            "no MCP servers configured — add them under \"mcp\" in ~/.harxes/config.json".into(),
+                        ));
+                    } else {
+                        for s in &wiring.mcp_status {
+                            st.lines.push(tui::ChatLine::Tool(s.clone()));
+                        }
+                        for t in &wiring.mcp_tools {
+                            st.lines.push(tui::ChatLine::Tool(format!("  · {t}")));
+                        }
+                    }
                     return;
                 }
                 "/sessions" => {

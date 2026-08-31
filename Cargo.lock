@@ -505,6 +505,7 @@ dependencies = [
  "harxes-infra-auth",
  "harxes-infra-fs",
  "harxes-infra-llm",
+ "harxes-infra-mcp",
  "harxes-infra-session",
  "harxes-infra-shell",
  "ratatui",
@@ -551,6 +552,16 @@ dependencies = [
  "harxes-infra-auth",
  "reqwest",
  "serde",
+ "serde_json",
+ "tokio",
+]
+
+[[package]]
+name = "harxes-infra-mcp"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "harxes-core-domain",
  "serde_json",
  "tokio",
 ]

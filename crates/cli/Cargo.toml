@@ -11,6 +11,7 @@ harxes-infra-llm    = { path = "../infrastructure/llm" }
 harxes-infra-session= { path = "../infrastructure/session" }
 harxes-infra-auth   = { path = "../infrastructure/auth" }
 harxes-infra-fs     = { path = "../infrastructure/fs" }
+harxes-infra-mcp    = { path = "../infrastructure/mcp" }
 
 [dependencies.clap]
 workspace = true

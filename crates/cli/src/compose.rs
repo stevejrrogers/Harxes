@@ -175,6 +175,10 @@ pub struct Wiring {
     pub todos: std::sync::Arc<
         std::sync::Mutex<Vec<harxes_core_domain::domain::value_objects::TodoItem>>,
     >,
+    /// Human-readable connection status per configured MCP server.
+    pub mcp_status: Vec<String>,
+    /// Fully-qualified names (`mcp__server__tool`) of connected MCP tools.
+    pub mcp_tools: Vec<String>,
 }
 
 /// Assemble a fully-wired agent for the given (optional) provider id. The CLI
@@ -208,20 +212,43 @@ pub fn assemble(
     let todos: std::sync::Arc<
         std::sync::Mutex<Vec<harxes_core_domain::domain::value_objects::TodoItem>>,
     > = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
-    let agent: Arc<dyn AgentPort> = Arc::new(
-        AgentLoop::with_session(
-            AgentLoop::new(llm, shell, fsys),
-            Arc::new(JsonSessionStore::new(default_config_dir())) as Arc<dyn SessionStorePort>,
-            pid.clone(),
-        )
-        .with_decider(decider)
-        .with_streaming(true)
-        .with_observer(Arc::new(observer))
-        .with_todos(todos.clone())
-        .with_command_policy(
-            JsonConfigStore::new(default_config_dir()).load().commands,
-        ),
-    );
+    let cfg = JsonConfigStore::new(default_config_dir()).load();
+    // Connect configured MCP servers (blocking briefly at startup); failures
+    // are reported as status lines, never fatal.
+    let mut mcp_status: Vec<String> = Vec::new();
+    let mut mcp_hub: Option<Arc<harxes_infra_mcp::McpToolHub>> = None;
+    if !cfg.mcp.is_empty() {
+        let rt = tokio::runtime::Runtime::new()
+            .map_err(|e| format!("failed to start runtime for MCP: {e}"))?;
+        let (hub, status) = rt.block_on(harxes_infra_mcp::McpToolHub::connect_all(&cfg.mcp));
+        mcp_status = status;
+        if !hub.is_empty() {
+            mcp_hub = Some(Arc::new(hub));
+        }
+        // Keep the runtime alive for the MCP child processes' IO.
+        std::mem::forget(rt);
+    }
+    let mut agent_loop = AgentLoop::with_session(
+        AgentLoop::new(llm, shell, fsys),
+        Arc::new(JsonSessionStore::new(default_config_dir())) as Arc<dyn SessionStorePort>,
+        pid.clone(),
+    )
+    .with_decider(decider)
+    .with_streaming(true)
+    .with_observer(Arc::new(observer))
+    .with_todos(todos.clone())
+    .with_command_policy(cfg.commands);
+    let mcp_tools: Vec<String> = mcp_hub
+        .as_ref()
+        .map(|h| {
+            use harxes_core_domain::ports::DynamicToolPort;
+            h.specs().into_iter().map(|s| s.id).collect()
+        })
+        .unwrap_or_default();
+    if let Some(hub) = mcp_hub {
+        agent_loop = agent_loop.with_dynamic_tools(hub);
+    }
+    let agent: Arc<dyn AgentPort> = Arc::new(agent_loop);
     Ok(Wiring {
         agent,
         provider_id: pid.clone(),
@@ -230,6 +257,8 @@ pub fn assemble(
         streamed,
         approval_gate,
         todos,
+        mcp_status,
+        mcp_tools,
     })
 }
 

@@ -28,6 +28,21 @@ pub struct HarxesConfig {
     /// Cost-estimate overrides: model-id substring -> USD per million tokens.
     #[serde(default)]
     pub pricing: std::collections::BTreeMap<String, ModelPricing>,
+    /// MCP servers to launch: name -> stdio launch spec. Their tools appear
+    /// to the model as `mcp__<name>__<tool>`.
+    #[serde(default)]
+    pub mcp: std::collections::BTreeMap<String, McpServerConfig>,
+}
+
+/// Launch spec for one stdio MCP server.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct McpServerConfig {
+    pub command: String,
+    #[serde(default)]
+    pub args: Vec<String>,
+    /// Extra environment variables for the server process.
+    #[serde(default)]
+    pub env: std::collections::BTreeMap<String, String>,
 }
 
 /// Driven port (hexagonal): persistence of user preferences (which provider is

@@ -1,0 +1,10 @@
+[package]
+name = "harxes-infra-mcp"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+harxes-core-domain = { path = "../../core-domain" }
+async-trait = { workspace = true }
+serde_json = { workspace = true }
+tokio = { workspace = true }
