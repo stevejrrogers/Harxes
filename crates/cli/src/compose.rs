@@ -286,6 +286,9 @@ pub fn available_providers() -> Vec<String> {
 pub struct ApprovalGate {
     inner: std::sync::Mutex<Vec<Request>>,
     wake: std::sync::Condvar,
+    /// True only when a UI is polling and can resolve requests. Without it,
+    /// requests auto-deny instead of blocking forever (e.g. one-shot mode).
+    interactive: std::sync::atomic::AtomicBool,
 }
 
 #[derive(Debug, Default)]
@@ -297,7 +300,16 @@ struct Request {
 impl ApprovalGate {
     /// Request approval for `description`; blocks the caller thread until a
     /// decision is made (or auto-denies if the process is shutting down).
+    /// Mark that an interactive UI is available to answer requests.
+    pub fn set_interactive(&self, on: bool) {
+        self.interactive
+            .store(on, std::sync::atomic::Ordering::Relaxed);
+    }
+
     pub fn request(&self, description: &str) -> bool {
+        if !self.interactive.load(std::sync::atomic::Ordering::Relaxed) {
+            return false;
+        }
         let mut q = self.inner.lock().unwrap();
         q.push(Request {
             description: description.to_string(),

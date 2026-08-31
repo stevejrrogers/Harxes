@@ -231,6 +231,8 @@ fn run_repl(
                 .unwrap_or(0)
         ),
     };
+    // The TUI polls the gate every frame, so approvals can be answered here.
+    wiring.approval_gate.set_interactive(true);
     let mut state = tui::AppState::new(&wiring.provider_id, &model);
     // The tasks panel renders straight from the agent-managed todo store, so
     // Todo-tool writes show up live while the agent is working.
