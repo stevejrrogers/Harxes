@@ -75,6 +75,19 @@ turn đang chạy trong TUI.
   chối thẳng không hỏi.
 - `pricing`: override giá ước tính — map substring của model id →
   `{ "input_per_mtok": USD, "output_per_mtok": USD }`.
+- `mcp`: MCP servers (stdio) — map tên server →
+  `{ "command": "...", "args": [...], "env": {...} }`. Tool xuất hiện với model
+  dưới tên `mcp__<server>__<tool>`; `/mcp` trong REPL liệt kê trạng thái.
+  Adapter ở `crates/infrastructure/mcp` (JSON-RPC line-delimited, initialize →
+  tools/list → tools/call, lỗi kết nối không fatal).
+
+## System prompt
+
+`build_system_prompt()` trong `crates/cli/src/main.rs`: identity + môi trường
+(cwd, OS, git branch) + kỷ luật làm việc (plan bằng Todo tool trước, verify
+bằng build/test trước khi báo xong, ưu tiên tool chuyên dụng, an toàn lệnh
+destructive). Dùng chung cho REPL và one-shot; workspace context (HARXES.md,
+NOTES.md) được nối vào sau.
 
 (Đã đóng: TUI live streaming — commit 62304cb; Bash child kill khi abort — process
 group + RAII guard trong `infrastructure/shell`; `reasoning_content` — fallback khi
