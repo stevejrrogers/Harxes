@@ -226,6 +226,51 @@ impl AgentLoop {
         result
     }
 
+    /// True when a tool call has no side effects and may run concurrently
+    /// with other read-only calls from the same turn.
+    fn is_read_only(name: &str) -> bool {
+        use harxes_core_domain::domain::services::tool_protocol::ToolId;
+        matches!(
+            ToolId::parse(name),
+            Some(ToolId::Read | ToolId::Grep | ToolId::Glob)
+        )
+    }
+
+    /// Execute a turn's tool calls, returning outputs in call order. Runs of
+    /// consecutive read-only calls execute concurrently; everything else runs
+    /// sequentially at its original position.
+    async fn execute_calls(
+        &self,
+        provider_id: &ProviderId,
+        model_id: &str,
+        calls: &[ToolCall],
+    ) -> Vec<String> {
+        let mut outputs: Vec<String> = vec![String::new(); calls.len()];
+        let mut i = 0usize;
+        while i < calls.len() {
+            if Self::is_read_only(calls[i].name.as_str()) {
+                let mut j = i;
+                while j < calls.len() && Self::is_read_only(calls[j].name.as_str()) {
+                    j += 1;
+                }
+                let batch = futures_util::future::join_all(
+                    calls[i..j]
+                        .iter()
+                        .map(|c| self.execute_call(provider_id, model_id, c)),
+                )
+                .await;
+                for (k, out) in batch.into_iter().enumerate() {
+                    outputs[i + k] = out;
+                }
+                i = j;
+            } else {
+                outputs[i] = self.execute_call(provider_id, model_id, &calls[i]).await;
+                i += 1;
+            }
+        }
+        outputs
+    }
+
     /// True when a hook rule's matcher applies to the tool name (empty or `*`
     /// matches everything; otherwise a case-insensitive `*`-wildcard match).
     fn hook_matches(matcher: &str, tool: &str) -> bool {
@@ -776,13 +821,16 @@ impl AgentLoop {
                 return Ok((out, transcript));
             }
 
-            // Feed tool calls + results back into the transcript.
+            // Feed tool calls + results back into the transcript. Read-only
+            // calls in the same turn run concurrently; anything mutating keeps
+            // strict sequential order.
             transcript.push(Message::assistant_with_tools(resp.tool_calls.clone()));
+            let mut outputs = self
+                .execute_calls(provider_id, model_id, &resp.tool_calls)
+                .await;
             let last_ix = resp.tool_calls.len().saturating_sub(1);
             for (i, call) in resp.tool_calls.iter().enumerate() {
-                let mut output = self
-                    .execute_call(provider_id, model_id, call)
-                    .await;
+                let mut output = std::mem::take(&mut outputs[i]);
                 // Fold a plan reminder into the last tool result of the turn
                 // when the plan has gone stale mid-task.
                 if i == last_ix {
@@ -1020,6 +1068,24 @@ mod tests {
                 exit_status: ShellExitStatus::Success,
             })
         }
+    }
+
+    #[tokio::test]
+    async fn mixed_calls_keep_positional_outputs() {
+        let a = agent(vec![]);
+        let pid = ProviderId::new("x").unwrap();
+        let calls = vec![
+            ToolCall { id: "1".into(), name: "Read".into(), arguments: r#"{"path":"a"}"#.into() },
+            ToolCall { id: "2".into(), name: "Read".into(), arguments: r#"{"path":"b"}"#.into() },
+            ToolCall { id: "3".into(), name: "Bash".into(), arguments: r#"{"command":"echo hi"}"#.into() },
+            ToolCall { id: "4".into(), name: "Read".into(), arguments: r#"{"path":"c"}"#.into() },
+        ];
+        let outs = a.execute_calls(&pid, "m", &calls).await;
+        assert_eq!(outs.len(), 4);
+        assert_eq!(outs[0], "read:a");
+        assert_eq!(outs[1], "read:b");
+        assert!(outs[2].contains("echo hi"), "{}", outs[2]);
+        assert_eq!(outs[3], "read:c");
     }
 
     #[tokio::test]
