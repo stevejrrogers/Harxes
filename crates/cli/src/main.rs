@@ -113,7 +113,7 @@ fn run_one_shot(wiring: &compose::Wiring, cli: &Cli, prompt: &str) {
     // One-shot runs get the same workspace context (project guide, notes) as
     // REPL turns, folded into the system prompt.
     let ctx = ContextStore::new(std::path::PathBuf::from(".harxes"));
-    let mut system = String::from("You are Harxes.");
+    let mut system = build_system_prompt();
     let block = ctx.build_context_block("one-shot");
     if !block.trim().is_empty() {
         system.push_str("\n\n");
@@ -155,6 +155,44 @@ fn run_one_shot(wiring: &compose::Wiring, cli: &Cli, prompt: &str) {
             std::process::exit(1);
         }
     }
+}
+
+/// The base system prompt: identity, environment, and working discipline.
+/// Workspace context (project guide, notes) is appended by the caller.
+fn build_system_prompt() -> String {
+    let cwd = std::env::current_dir()
+        .map(|p| p.display().to_string())
+        .unwrap_or_default();
+    let branch = {
+        let head = std::path::Path::new(".git").join("HEAD");
+        std::fs::read_to_string(head)
+            .ok()
+            .and_then(|c| c.strip_prefix("ref: refs/heads/").map(|b| b.trim().to_string()))
+    };
+    let mut env = format!("Working directory: {cwd}\nPlatform: {}", std::env::consts::OS);
+    if let Some(b) = branch {
+        env.push_str(&format!("\nGit branch: {b}"));
+    }
+    format!(
+        "You are Harxes, a coding agent running in the user's terminal. You complete tasks \
+         by calling tools; your final text is shown to the user.\n\n\
+         # Environment\n{env}\n\n\
+         # How to work\n\
+         - For any task with more than one step, first write a plan with the Todo tool \
+         (action=write), keep exactly one item in_progress, and mark items completed as you \
+         finish them.\n\
+         - Prefer dedicated tools (Read, Write, Edit, Grep, Glob) over shell equivalents; \
+         use Bash for builds, tests and everything else.\n\
+         - Verify your work: after changing code, run the project's build or tests before \
+         declaring success. Report failures honestly.\n\
+         - Use Delegate for self-contained sub-tasks that would bloat your context.\n\
+         - Match the surrounding code style. Never invent file contents — read before \
+         editing.\n\
+         - Be concise: answer directly, no preamble or restating the task. Use markdown \
+         sparingly.\n\
+         - Never run destructive commands (rm -rf, force-push, resets) unless the user \
+         explicitly asked for that exact operation."
+    )
 }
 
 /// Build the initial todo store from plan labels: all pending except the
@@ -874,9 +912,17 @@ async fn run_turn_owned(
     let _ = ctx_store.ensure_session(&session_id);
     // Load persisted session + workspace memory into the transcript.
     let mut messages = history;
+    // Fresh conversations get the full system prompt; resumed ones may already
+    // carry one, so only insert when the transcript has no system message yet.
+    let has_system = messages.iter().any(|m| m.role == Role::System);
+    let mut system = build_system_prompt();
     let ctx_block = ctx_store.build_context_block(&session_id);
     if !ctx_block.trim().is_empty() {
-        messages.insert(0, Message::new(Role::System, ctx_block));
+        system.push_str("\n\n");
+        system.push_str(&ctx_block);
+    }
+    if !has_system {
+        messages.insert(0, Message::new(Role::System, system));
     }
     match agent
         .continue_chat(&pid, &model, &messages, &user_msg, &limits)
