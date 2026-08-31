@@ -148,6 +148,25 @@ fn run_one_shot(wiring: &compose::Wiring, cli: &Cli, prompt: &str) {
     }
 }
 
+/// Build the initial todo store from plan labels: all pending except the
+/// first step, which starts in_progress.
+fn seed_todos(
+    labels: Vec<String>,
+) -> Vec<harxes_core_domain::domain::value_objects::TodoItem> {
+    use harxes_core_domain::domain::value_objects::{TodoItem, TodoStatus};
+    labels
+        .into_iter()
+        .enumerate()
+        .map(|(i, l)| {
+            let mut t = TodoItem::new(l);
+            if i == 0 {
+                t.status = TodoStatus::InProgress;
+            }
+            t
+        })
+        .collect()
+}
+
 fn run_repl(
     wiring: &compose::Wiring,
     cli: &Cli,
@@ -166,11 +185,17 @@ fn run_repl(
         ),
     };
     let mut state = tui::AppState::new(&wiring.provider_id, &model);
+    // The tasks panel renders straight from the agent-managed todo store, so
+    // Todo-tool writes show up live while the agent is working.
+    state.todos = wiring.todos.clone();
     state.active_tools = wiring.active_tools.clone();
 
     use harxes_core_domain::domain::value_objects::Role;
     // Seed chat pane from any resumed history.
-    let transcript = load_history(cli);
+    let (transcript, saved_todos) = load_history(cli);
+    if !saved_todos.is_empty() {
+        *wiring.todos.lock().unwrap() = saved_todos;
+    }
     for m in &transcript {
         if m.role == Role::User {
             state.lines.push(tui::ChatLine::User(m.content.clone()));
@@ -317,7 +342,10 @@ fn run_repl(
                             "could not generate plan",
                         )));
                     } else {
-                        st.set_plan(labels);
+                        st.set_plan(labels.clone());
+                        // Seed the shared, agent-managed todo store; the first
+                        // step starts in_progress.
+                        *wiring.todos.lock().unwrap() = seed_todos(labels);
                         for (i, t) in st.plan.iter().enumerate() {
                             st.lines.push(tui::ChatLine::Tool(format!(
                                 "{} [ ] {}",
@@ -325,6 +353,9 @@ fn run_repl(
                                 t.label
                             )));
                         }
+                        st.lines.push(tui::ChatLine::Tool(
+                            "plan is active — the agent tracks progress via its Todo tool".into(),
+                        ));
                     }
                     st.processing = false;
                     return;
@@ -332,42 +363,96 @@ fn run_repl(
 
                 _ if t.starts_with("/todo") => {
                     let arg = t.trim_start_matches("/todo").trim();
-                    if let Some(rest) = arg.strip_prefix("done ") {
-                        if let Ok(n) = rest.trim().parse::<usize>() {
-                            if let Some(item) = st.plan.get_mut(n.saturating_sub(1)) {
-                                item.done = true;
-                                st.lines
-                                    .push(tui::ChatLine::Tool(format!("done: {}", item.label)));
-                            } else {
-                                st.lines
-                                    .push(tui::ChatLine::Agent(String::from("no such item")));
-                            }
-                        } else {
-                            st.lines
-                                .push(tui::ChatLine::Agent(String::from("usage: /todo done <n>")));
-                        }
-                    } else if arg == "list" || arg.is_empty() {
-                        if st.plan.is_empty() {
-                            st.lines.push(tui::ChatLine::Tool(
-                                "(empty plan — use /plan <task>)".into(),
-                            ));
-                        } else {
-                            for (i, t) in st.plan.iter().enumerate() {
-                                let m = if t.done { "[✓]" } else { "[ ]" };
-                                st.lines.push(tui::ChatLine::Tool(format!(
-                                    "{} {} {}",
-                                    i + 1,
-                                    m,
-                                    t.label
-                                )));
-                            }
-                        }
-                    } else {
-                        st.lines.push(tui::ChatLine::Agent(String::from(
-                            "usage: /todo done <n> | /todo list",
-                        )));
-                    }
-                    return;
+                   let verb = arg.split_whitespace().next();
+                   match verb {
+                       Some("done") => {
+                           let n = arg
+                               .split_whitespace()
+                               .nth(1)
+                               .and_then(|s| s.parse::<usize>().ok());
+                           match n {
+                               Some(n) if n >= 1 => {
+                                   let mut store = wiring.todos.lock().unwrap();
+                                   if n <= store.len() {
+                                       store[n - 1].status =
+                                           harxes_core_domain::domain::value_objects::TodoStatus::Completed;
+                                       let label = store[n - 1].label.clone();
+                                       if let Some(item) = st.plan.get_mut(n - 1) {
+                                           item.done = true;
+                                       }
+                                       st.lines.push(tui::ChatLine::Tool(format!(
+                                           "done: {label}"
+                                       )));
+                                   } else {
+                                       st.lines.push(tui::ChatLine::Agent(format!(
+                                           "no item {n} (plan has {})",
+                                           store.len()
+                                       )));
+                                   }
+                               }
+                               _ => st.lines.push(tui::ChatLine::Agent(String::from(
+                                   "usage: /todo done <n>",
+                               ))),
+                           }
+                       }
+                       Some("add") => {
+                           let label = arg
+                               .strip_prefix("add")
+                               .unwrap_or("")
+                               .trim()
+                               .to_string();
+                           if label.is_empty() {
+                               st.lines.push(tui::ChatLine::Agent(String::from(
+                                   "usage: /todo add <text>",
+                               )));
+                           } else {
+                               wiring.todos.lock().unwrap().push(
+                                   harxes_core_domain::domain::value_objects::TodoItem::new(
+                                       label.clone(),
+                                   ),
+                               );
+                               st.plan.push(tui::TaskItem::new(label.clone()));
+                               st.lines.push(tui::ChatLine::Tool(format!(
+                                   "added todo: {label}"
+                               )));
+                           }
+                       }
+                       Some("list") | None => {
+                           let store = wiring.todos.lock().unwrap();
+                           st.plan = store
+                               .iter()
+                               .map(|i| {
+                                   let mut ti = tui::TaskItem::new(i.label.clone());
+                                   ti.done = i.done();
+                                   ti
+                               })
+                               .collect();
+                           if store.is_empty() {
+                               st.lines.push(tui::ChatLine::Tool(
+                                   "(empty plan — use /plan <task>)".into(),
+                               ));
+                           } else {
+                               use harxes_core_domain::domain::value_objects::TodoStatus;
+                               for (i, item) in store.iter().enumerate() {
+                                   let m = match item.status {
+                                       TodoStatus::Completed => "[✓]",
+                                       TodoStatus::InProgress => "[▸]",
+                                       TodoStatus::Pending => "[ ]",
+                                   };
+                                   st.lines.push(tui::ChatLine::Tool(format!(
+                                       "{} {} {}",
+                                       i + 1,
+                                       m,
+                                       item.label
+                                   )));
+                               }
+                           }
+                       }
+                       _ => st.lines.push(tui::ChatLine::Agent(String::from(
+                           "usage: /todo done <n> | /todo add <text> | /todo list",
+                       ))),
+                   }
+                   return;
                 }
 
                 _ if t == "/theme" || t.starts_with("/theme ") => {
@@ -535,7 +620,8 @@ fn run_repl(
                 let labels =
                     rt.block_on(generate_plan(wiring.agent.clone(), &pid3, &cur_model2, &t));
                 if !labels.is_empty() {
-                    st.set_plan(labels);
+                    st.set_plan(labels.clone());
+                    *wiring.todos.lock().unwrap() = seed_todos(labels);
                     for (i, it) in st.plan.iter().enumerate() {
                         st.lines
                             .push(tui::ChatLine::Tool(format!("{} [ ] {}", i + 1, it.label)));
@@ -559,6 +645,7 @@ fn run_repl(
             let txc = tx.clone();
             let handle2 = handle.clone();
             let turn_slot = turn_handle.clone();
+            let todos_for_turn = wiring.todos.clone();
             let jh = handle2.spawn(async move {
                 let r = run_turn_owned(
                     agent,
@@ -570,6 +657,7 @@ fn run_repl(
                     history_snapshot,
                     t,
                     limits,
+                    todos_for_turn,
                 )
                 .await;
                 let _ = txc.send(r);
@@ -654,19 +742,24 @@ fn run_repl(
     }
 }
 
-fn load_history(cli: &Cli) -> Vec<Message> {
+fn load_history(
+    cli: &Cli,
+) -> (
+    Vec<Message>,
+    Vec<harxes_core_domain::domain::value_objects::TodoItem>,
+) {
     match &cli.resume {
         Some(id) => {
             let store = JsonSessionStore::new(compose::default_config_dir());
             match store.load(id) {
-                Some(rec) => rec.transcript,
+                Some(rec) => (rec.transcript, rec.todos),
                 None => {
                     eprintln!("harxes: no saved session '{id}', starting fresh");
-                    vec![]
+                    (vec![], vec![])
                 }
             }
         }
-        None => vec![],
+        None => (vec![], vec![]),
     }
 }
 
@@ -683,6 +776,9 @@ async fn run_turn_owned(
     history: Vec<Message>,
     user_msg: String,
     limits: harxes_app::usecases::agent_loop::LoopLimits,
+    todos: Arc<
+        std::sync::Mutex<Vec<harxes_core_domain::domain::value_objects::TodoItem>>,
+    >,
 ) -> Result<(Vec<tui::ChatLine>, u64, u64, Vec<Message>), String> {
     let pid = ProviderId::new(&pid_str).unwrap_or_else(|_| ProviderId::new("anthropic").unwrap());
     let store = JsonSessionStore::new(config_dir);
@@ -706,6 +802,7 @@ async fn run_turn_owned(
                 id: session_id,
                 created_at: String::new(),
                 transcript: new_hist.clone(),
+                todos: todos.lock().unwrap().clone(),
             });
             // Emit what the agent did and said, in chronological order.
             let mut results: std::collections::HashMap<String, String> = Default::default();

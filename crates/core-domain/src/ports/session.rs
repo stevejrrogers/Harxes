@@ -3,7 +3,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::domain::value_objects::Message;
+use crate::domain::value_objects::{Message, TodoItem};
 
 /// A serializable record of one agent session.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -11,6 +11,9 @@ pub struct SessionRecord {
     pub id: String,
     pub created_at: String,
     pub transcript: Vec<Message>,
+    /// Snapshot of the agent-managed plan, restored on `--resume`.
+    #[serde(default)]
+    pub todos: Vec<TodoItem>,
 }
 
 /// Driven port for storing/loading [`SessionRecord`]s on disk.

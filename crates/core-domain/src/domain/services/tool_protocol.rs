@@ -3,7 +3,7 @@
 //! result back into the transcript. Keeps model-facing conventions out of the
 //! application usecase layer.
 
-use crate::domain::value_objects::ToolSpec;
+use crate::domain::value_objects::{TodoAction, TodoItem, TodoStatus, ToolSpec};
 
 /// Identifiers of the tools the agent may invoke.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -15,6 +15,7 @@ pub enum ToolId {
     Grep,
     Glob,
     Delegate,
+    Todo,
 }
 
 impl ToolId {
@@ -27,6 +28,7 @@ impl ToolId {
             ToolId::Grep => "Grep",
             ToolId::Glob => "Glob",
             ToolId::Delegate => "Delegate",
+            ToolId::Todo => "Todo",
         }
     }
     pub fn parse(name: &str) -> Option<ToolId> {
@@ -38,6 +40,7 @@ impl ToolId {
             "Grep" | "grep" => Some(ToolId::Grep),
             "Glob" | "glob" => Some(ToolId::Glob),
             "Delegate" | "delegate" => Some(ToolId::Delegate),
+            "Todo" | "todo" => Some(ToolId::Todo),
             _ => None,
         }
     }
@@ -53,6 +56,7 @@ pub enum ParsedArgs {
     Grep { needle: String, pattern: String, max_matches: usize },
     Glob { pattern: String, max_depth: Option<usize> },
     Delegate { task: String, context: Option<String> },
+    Todo { action: TodoAction, items: Vec<TodoItem> },
 }
 
 /// The full set of tool specifications offered to the model.
@@ -113,6 +117,38 @@ pub fn all_tool_specs() -> Vec<ToolSpec> {
                     "type": "object",
                     "properties": properties,
                     "required": ["task"],
+                })
+            },
+        ),
+        ToolSpec::with_schema(
+            "Todo",
+            "Manage your task plan. Use action=write to replace the entire plan with the `todos` array — send the complete updated list every time (never a partial one). Mark exactly one item in_progress before starting work on it, and mark it completed immediately when finished. Use for any multi-step task; action=list reads the current plan back.",
+            {
+                let mut properties = serde_json::Map::new();
+                properties.insert(
+                    "action".to_string(),
+                    serde_json::json!({ "type": "string", "enum": ["write", "list"], "description": "write replaces the whole plan; list reads it" }),
+                );
+                properties.insert(
+                    "todos".to_string(),
+                    serde_json::json!({
+                        "type": "array",
+                        "description": "The complete plan (required for write)",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "label": { "type": "string", "description": "Imperative step description, e.g. 'Run tests'" },
+                                "active_form": { "type": "string", "description": "Present-continuous form shown while working, e.g. 'Running tests'" },
+                                "status": { "type": "string", "enum": ["pending", "in_progress", "completed"] }
+                            },
+                            "required": ["label", "status"]
+                        }
+                    }),
+                );
+                serde_json::json!({
+                    "type": "object",
+                    "properties": properties,
+                    "required": ["action"],
                 })
             },
         ),
@@ -205,6 +241,41 @@ pub fn parse_args(tool: ToolId, raw: &str) -> ParsedArgs {
                         context: context.map(|s| s.to_string()),
                     };
                 }
+                ToolId::Todo => {
+                    let action = obj
+                        .get("action")
+                        .and_then(|x| x.as_str())
+                        .and_then(TodoAction::parse)
+                        .unwrap_or(TodoAction::List);
+                    let items = obj
+                        .get("todos")
+                        .and_then(|x| x.as_array())
+                        .map(|arr| {
+                            arr.iter()
+                                .filter_map(|it| {
+                                    let label = it.get("label")?.as_str()?.trim();
+                                    if label.is_empty() {
+                                        return None;
+                                    }
+                                    Some(TodoItem {
+                                        label: label.to_string(),
+                                        active_form: it
+                                            .get("active_form")
+                                            .and_then(|x| x.as_str())
+                                            .unwrap_or("")
+                                            .to_string(),
+                                        status: it
+                                            .get("status")
+                                            .and_then(|x| x.as_str())
+                                            .and_then(TodoStatus::parse)
+                                            .unwrap_or(TodoStatus::Pending),
+                                    })
+                                })
+                                .collect()
+                        })
+                        .unwrap_or_default();
+                    return ParsedArgs::Todo { action, items };
+                }
             }
         }
     }
@@ -244,6 +315,10 @@ pub fn parse_args(tool: ToolId, raw: &str) -> ParsedArgs {
         ToolId::Delegate => ParsedArgs::Delegate {
             task: raw.trim().to_string(),
             context: None,
+        },
+        ToolId::Todo => ParsedArgs::Todo {
+            action: TodoAction::List,
+            items: Vec::new(),
         },
     }
 }
@@ -295,6 +370,31 @@ mod tests {
                 assert!(context.is_none());
             }
             _ => panic!("expected delegate"),
+        }
+    }
+
+    #[test]
+    fn parse_json_todo_args() {
+        let raw = r#"{"action":"write","todos":[
+            {"label":"write tests","active_form":"Writing tests","status":"in_progress"},
+            {"label":"ship it","status":"pending"},
+            {"label":"","status":"pending"}
+        ]}"#;
+        match parse_args(ToolId::Todo, raw) {
+            ParsedArgs::Todo { action, items } => {
+                assert_eq!(action, TodoAction::Write);
+                assert_eq!(items.len(), 2, "blank labels are dropped");
+                assert_eq!(items[0].label, "write tests");
+                assert_eq!(items[0].active_form, "Writing tests");
+                assert_eq!(items[0].status, TodoStatus::InProgress);
+                assert_eq!(items[1].status, TodoStatus::Pending);
+            }
+            _ => panic!("expected todo"),
+        }
+        // unknown action defaults to list
+        match parse_args(ToolId::Todo, r#"{"action":"nope"}"#) {
+            ParsedArgs::Todo { action, .. } => assert_eq!(action, TodoAction::List),
+            _ => panic!("expected todo"),
         }
     }
 }

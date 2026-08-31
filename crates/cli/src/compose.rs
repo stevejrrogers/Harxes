@@ -171,6 +171,10 @@ pub struct Wiring {
     pub streamed: std::sync::Arc<std::sync::atomic::AtomicBool>,
     /// Interactive approval gate for dangerous operations.
     pub approval_gate: Arc<ApprovalGate>,
+    /// Shared plan/todo list (agent-managed via the Todo tool, seeded by /plan).
+    pub todos: std::sync::Arc<
+        std::sync::Mutex<Vec<harxes_core_domain::domain::value_objects::TodoItem>>,
+    >,
 }
 
 /// Assemble a fully-wired agent for the given (optional) provider id. The CLI
@@ -201,6 +205,9 @@ pub fn assemble(
     };
     let approval_gate = Arc::new(ApprovalGate::default());
     let decider = Arc::new(GateDecider(approval_gate.clone()));
+    let todos: std::sync::Arc<
+        std::sync::Mutex<Vec<harxes_core_domain::domain::value_objects::TodoItem>>,
+    > = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
     let agent: Arc<dyn AgentPort> = Arc::new(
         AgentLoop::with_session(
             AgentLoop::new(llm, shell, fsys),
@@ -209,7 +216,8 @@ pub fn assemble(
         )
         .with_decider(decider)
         .with_streaming(true)
-        .with_observer(Arc::new(observer)),
+        .with_observer(Arc::new(observer))
+        .with_todos(todos.clone()),
     );
     Ok(Wiring {
         agent,
@@ -218,6 +226,7 @@ pub fn assemble(
         active_tools,
         streamed,
         approval_gate,
+        todos,
     })
 }
 

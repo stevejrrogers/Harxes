@@ -51,6 +51,8 @@ pub struct AgentLoop {
     /// Depth of nested sub-agent delegation (0 = top-level agent). Capped to
     /// prevent unbounded recursion through the `Delegate` tool.
     delegation_depth: usize,
+    /// Shared plan/todo list the agent can manage with the `Todo` tool.
+    todos: Option<Arc<std::sync::Mutex<Vec<harxes_core_domain::domain::value_objects::TodoItem>>>>,
 }
 
 impl AgentLoop {
@@ -69,6 +71,7 @@ impl AgentLoop {
             observer: None,
             stream: false,
             delegation_depth: 0,
+            todos: None,
         }
     }
 
@@ -103,6 +106,15 @@ impl AgentLoop {
     /// Attach an observer for live tool-execution feedback.
     pub fn with_observer(mut self, o: Arc<dyn harxes_core_domain::ports::ToolObserver>) -> Self {
         self.observer = Some(o);
+        self
+    }
+
+    /// Attach a shared plan/todo list the agent can manage via the `Todo` tool.
+    pub fn with_todos(
+        mut self,
+        todos: Arc<std::sync::Mutex<Vec<harxes_core_domain::domain::value_objects::TodoItem>>>,
+    ) -> Self {
+        self.todos = Some(todos);
         self
     }
 
@@ -154,6 +166,7 @@ impl AgentLoop {
                     self.delegate_subtask(provider_id, model_id, &task, context.as_deref())
                         .await
                 }
+                ParsedArgs::Todo { action, items } => self.handle_todo(action, items),
             },
             None => format!("unknown tool '{}'", call.name),
         };
@@ -397,6 +410,9 @@ impl AgentLoop {
             observer: None,
             stream: false,
             delegation_depth: self.delegation_depth + 1,
+            // Sub-agents do not touch the parent's plan: delegated tasks are a
+            // single step from the parent's perspective.
+            todos: None,
         };
         let limits = LoopLimits {
             max_iterations: 15,
@@ -406,6 +422,56 @@ impl AgentLoop {
         match sub.run(provider_id, model_id, system, &prompt, &limits).await {
             Ok(out) => format!("[sub-agent result]\n{}", out.final_text),
             Err(e) => format!("sub-agent error {e}"),
+        }
+    }
+
+    /// Apply a `Todo` action against the shared plan list: `write` replaces
+    /// the whole plan atomically, `list` reads it back. Returns a short report
+    /// folded into the transcript.
+    fn handle_todo(
+        &self,
+        action: harxes_core_domain::domain::value_objects::TodoAction,
+        new_items: Vec<harxes_core_domain::domain::value_objects::TodoItem>,
+    ) -> String {
+        use harxes_core_domain::domain::value_objects::{
+            normalize_todos, render_todos, TodoAction,
+        };
+        let Some(list) = &self.todos else {
+            return "todo error: the Todo tool is not available in this context".to_string();
+        };
+        let mut items = list.lock().unwrap();
+        match action {
+            TodoAction::List => {
+                if items.is_empty() {
+                    return "todo: (empty plan)".to_string();
+                }
+                let done = items.iter().filter(|i| i.done()).count();
+                format!("todo ({done}/{} done):\n{}", items.len(), render_todos(&items))
+            }
+            TodoAction::Write => {
+                if new_items.is_empty() {
+                    return "todo error: write requires a non-empty `todos` array (send the complete plan)".to_string();
+                }
+                let mut next = new_items;
+                normalize_todos(&mut next);
+                *items = next;
+                let done = items.iter().filter(|i| i.done()).count();
+                format!(
+                    "plan updated ({done}/{} done):\n{}",
+                    items.len(),
+                    render_todos(&items)
+                )
+            }
+        }
+    }
+
+    /// Snapshot of the shared plan, or None when no plan is attached/empty.
+    fn todo_snapshot(&self) -> Option<Vec<harxes_core_domain::domain::value_objects::TodoItem>> {
+        let items = self.todos.as_ref()?.lock().unwrap().clone();
+        if items.is_empty() {
+            None
+        } else {
+            Some(items)
         }
     }
 
@@ -501,6 +567,10 @@ impl AgentLoop {
     ) -> Result<(LoopOutcome, Vec<Message>), LlmError> {
         let tools = Self::tool_specs();
         let mut iterations = 0usize;
+        // Plan-awareness tracking: nudge the model when it works for several
+        // turns without touching an in-progress plan (Phase-2 "staleness nudge").
+        let mut last_plan = self.todo_snapshot();
+        let mut plan_stale_turns = 0usize;
         let mut total_tokens = 0u64;
         let mut total_input = 0u64;
         let mut total_output = 0u64;
@@ -548,10 +618,34 @@ impl AgentLoop {
 
             // Feed tool calls + results back into the transcript.
             transcript.push(Message::assistant_with_tools(resp.tool_calls.clone()));
-            for call in resp.tool_calls.iter() {
-                let output = self
+            let last_ix = resp.tool_calls.len().saturating_sub(1);
+            for (i, call) in resp.tool_calls.iter().enumerate() {
+                let mut output = self
                     .execute_call(provider_id, model_id, call)
                     .await;
+                // Fold a plan reminder into the last tool result of the turn
+                // when the plan has gone stale mid-task.
+                if i == last_ix {
+                    let now = self.todo_snapshot();
+                    if now == last_plan {
+                        plan_stale_turns += 1;
+                    } else {
+                        plan_stale_turns = 0;
+                        last_plan = now.clone();
+                    }
+                    let has_active = now
+                        .as_ref()
+                        .map(|p| p.iter().any(|t| !t.done()))
+                        .unwrap_or(false);
+                    if has_active && plan_stale_turns >= 5 {
+                        use harxes_core_domain::domain::value_objects::render_todos;
+                        output.push_str(&format!(
+                            "\n\n<system-reminder>Your todo plan has not been updated for a while. Current state:\n{}\nUse the Todo tool (action=write) to mark finished steps completed and set the step you are on to in_progress.</system-reminder>",
+                            render_todos(now.as_deref().unwrap_or(&[]))
+                        ));
+                        plan_stale_turns = 0;
+                    }
+                }
                 transcript.push(Message::tool_result(call.id.clone(), output));
             }
         }
@@ -595,6 +689,7 @@ impl AgentLoop {
                 id: id.clone(),
                 created_at: String::new(),
                 transcript: transcript.to_vec(),
+                todos: self.todo_snapshot().unwrap_or_default(),
             };
             let _ = store.save(&rec);
         }
@@ -839,6 +934,77 @@ mod tests {
             .unwrap();
         // The empty-task delegate is rejected and folded into a subsequent turn.
         assert_eq!(out.final_text, "done");
+    }
+
+    #[tokio::test]
+    async fn todo_tool_updates_shared_plan() {
+        use harxes_core_domain::domain::value_objects::TodoItem;
+        let todos: Arc<std::sync::Mutex<Vec<TodoItem>>> =
+            Arc::new(std::sync::Mutex::new(vec![
+                TodoItem::new("step one"),
+                TodoItem::new("step two"),
+            ]));
+        let mark_done = ToolCall {
+            id: "t1".into(),
+            name: "Todo".into(),
+            arguments: r#"{"action":"write","todos":[
+                {"label":"step one","status":"completed"},
+                {"label":"step two","active_form":"Doing step two","status":"in_progress"}
+            ]}"#.into(),
+        };
+        let script = vec![
+            AgentResponse {
+                content: String::new(),
+                usage: Default::default(),
+                tool_calls: vec![mark_done],
+            },
+            AgentResponse::text("all set", Default::default()),
+        ];
+        let a = agent(script).with_todos(todos.clone());
+        let pid = ProviderId::new("x").unwrap();
+        let out = a
+            .run(&pid, "m", "sys", "plan the work", &LoopLimits::default())
+            .await
+            .unwrap();
+        assert_eq!(out.final_text, "all set");
+        let items = todos.lock().unwrap();
+        assert!(items[0].done(), "step one should be marked done");
+        assert!(!items[1].done());
+        assert_eq!(items[1].active_label(), "Doing step two");
+    }
+
+    #[tokio::test]
+    async fn todo_list_renders_current_plan() {
+        use harxes_core_domain::domain::value_objects::TodoItem;
+        let todos: Arc<std::sync::Mutex<Vec<TodoItem>>> =
+            Arc::new(std::sync::Mutex::new(vec![
+                TodoItem::new("alpha"),
+                TodoItem::new("beta"),
+            ]));
+        let list = ToolCall {
+            id: "t1".into(),
+            name: "Todo".into(),
+            arguments: r#"{"action":"list"}"#.into(),
+        };
+        let script = vec![
+            AgentResponse {
+                content: String::new(),
+                usage: Default::default(),
+                tool_calls: vec![list],
+            },
+            AgentResponse::text("ok", Default::default()),
+        ];
+        let a = agent(script).with_todos(todos.clone());
+        let pid = ProviderId::new("x").unwrap();
+        let _ = a
+            .run(&pid, "m", "sys", "go", &LoopLimits::default())
+            .await
+            .unwrap();
+        // The list result is folded into the transcript as a tool result.
+        // A second text turn means the loop completed normally.
+        let items = todos.lock().unwrap();
+        assert_eq!(items.len(), 2);
+        assert!(!items[0].done() && !items[1].done());
     }
 
     #[tokio::test]

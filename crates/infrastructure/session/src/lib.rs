@@ -121,6 +121,7 @@ mod session_tests {
                 Message::new(Role::System, "sys"),
                 Message::new(Role::User, "hi"),
             ],
+            todos: vec![],
         };
         store.save(&rec).unwrap();
         let loaded = store.load("s1").expect("should load");

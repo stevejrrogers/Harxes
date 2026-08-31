@@ -126,6 +126,11 @@ pub struct AppState {
     pub approval_prompt: Option<String>,
     /// Agent-proposed plan broken into subtasks with checkboxes.
     pub plan: Vec<TaskItem>,
+    /// Live view of the agent-managed todo store (shared with the agent loop);
+    /// when non-empty it supersedes `plan` in the tasks panel.
+    pub todos: std::sync::Arc<
+        std::sync::Mutex<Vec<harxes_core_domain::domain::value_objects::TodoItem>>,
+    >,
     /// Pane background theme (dark or light).
     pub theme: PaneTheme,
     /// True while the current turn's text is arriving via live streaming.
@@ -164,6 +169,7 @@ impl AppState {
             active_tools: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
             approval_prompt: None,
             plan: vec![],
+            todos: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
             theme: PaneTheme::dark(),
             streaming_turn: false,
             live_text: String::new(),
@@ -487,7 +493,11 @@ fn status_panel(frame: &mut Frame, state: &AppState, area: Rect) {
 }
 
 fn tasks_panel(frame: &mut Frame, state: &AppState, area: Rect) {
-    let has_plan = !state.plan.is_empty();
+    use harxes_core_domain::domain::value_objects::TodoStatus;
+    // The agent-managed store is the live source of truth; the legacy
+    // `state.plan` list is only a fallback for pre-todo flows.
+    let todos = state.todos.lock().unwrap().clone();
+    let has_plan = !todos.is_empty() || !state.plan.is_empty();
     if !state.processing
         && state.status.tools_used.is_empty()
         && state.approval_prompt.is_none()
@@ -496,11 +506,50 @@ fn tasks_panel(frame: &mut Frame, state: &AppState, area: Rect) {
         return;
     }
     let mut text = ratatui::text::Text::default();
+    let done = todos.iter().filter(|t| t.done()).count();
+    let header = if todos.is_empty() {
+        "  PLAN".to_string()
+    } else {
+        format!("  PLAN {done}/{}", todos.len())
+    };
     text.push_line(Line::from(vec![Span::styled(
-        "  PLAN",
+        header,
         Style::new().fg(Color::Cyan).bold(),
     )]));
-    if has_plan {
+    if !todos.is_empty() {
+        const SPIN: [char; 4] = ['⠋', '⠙', '⠸', '⠴'];
+        if done == todos.len() {
+            text.push_line(Line::from(vec![Span::styled(
+                format!("  ✓ all {done} steps done"),
+                Style::new().fg(Color::Green),
+            )]));
+        } else {
+            for t in &todos {
+                let (mark, col, label) = match t.status {
+                    TodoStatus::Completed => {
+                        ("✓".to_string(), Color::DarkGray, t.label.clone())
+                    }
+                    TodoStatus::InProgress => (
+                        SPIN[state.spinner as usize % SPIN.len()].to_string(),
+                        Color::Cyan,
+                        t.active_label().to_string(),
+                    ),
+                    TodoStatus::Pending => ("○".to_string(), Color::White, t.label.clone()),
+                };
+                let style = if t.status == TodoStatus::Completed {
+                    Style::new().fg(col).add_modifier(Modifier::CROSSED_OUT)
+                } else if t.status == TodoStatus::InProgress {
+                    Style::new().fg(col).bold()
+                } else {
+                    Style::new().fg(col)
+                };
+                text.push_line(Line::from(vec![
+                    Span::styled(format!("  {mark} "), Style::new().fg(col)),
+                    Span::styled(label, style),
+                ]));
+            }
+        }
+    } else if !state.plan.is_empty() {
         for t in &state.plan {
             let box_mark = if t.done { "[✓]" } else { "[ ]" };
             let col = if t.done { Color::Green } else { Color::White };
