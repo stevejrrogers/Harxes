@@ -65,12 +65,12 @@ turn đang chạy trong TUI.
 
 ## Những việc/chỗ còn hở
 
-- TUI chưa live-refresh streaming theo từng delta (chỉ hiển thị final text sau khi xong);
-  delta đang được dùng cho one-shot CLI.
-- Bash child process có thể không bị kill trọn vẹn khi abort mid-run (tokio `Child` drop
-  không kill process mặc định).
-- OpenAI một số model gửi `delta.reasoning_content` — chưa xử lý, chỉ consume content.
-- Chưa test streaming chạy thật với API live.
+- Delegate sub-agent chạy ngầm, TUI chưa hiển thị nested tool activity của nó.
+- Chưa có cost/usage report per-model cuối phiên (roadmap Phase 5.4).
+
+(Đã đóng: TUI live streaming — commit 62304cb; Bash child kill khi abort — process
+group + RAII guard trong `infrastructure/shell`; `reasoning_content` — fallback khi
+content rỗng trong adapter OpenAI; đã smoke-test tool-calling loop live qua LiteLLM.)
 
 ## Nguyên tắc xuyên suốt
 

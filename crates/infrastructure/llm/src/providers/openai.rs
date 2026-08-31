@@ -142,6 +142,10 @@ struct Choice {
 #[derive(serde::Deserialize)]
 struct ResponseMessage {
     content: Option<String>,
+    /// Reasoning-model channel (DeepSeek, GLM, o-series via proxies). Only
+    /// used as a fallback when `content` comes back empty.
+    #[serde(default)]
+    reasoning_content: Option<String>,
     #[serde(default)]
     tool_calls: Vec<ResponseToolCall>,
 }
@@ -172,10 +176,21 @@ pub struct OpenAiClient {
 
 impl OpenAiClient {
     pub fn new(base_url: impl Into<String>, api_key: impl Into<String>) -> Self {
+        // `base_url` is the FULL endpoint URL — except the common case of an
+        // OpenAI-compatible API root (`.../v1` or a bare origin), which gets
+        // `/chat/completions` appended so users can paste the base URL a
+        // proxy like LiteLLM advertises.
+        let mut url = base_url.into().trim_end_matches('/').to_string();
+        let bare_origin = url
+            .split_once("://")
+            .map(|(_, rest)| !rest.contains('/'))
+            .unwrap_or(false);
+        if url.ends_with("/v1") || bare_origin {
+            url.push_str("/chat/completions");
+        }
         Self {
             http: reqwest::Client::new(),
-            // `base_url` is a FULL endpoint URL; do not append path.
-            base_url: base_url.into().trim_end_matches('/').to_string(),
+            base_url: url,
             api_key: api_key.into(),
         }
     }
@@ -225,7 +240,12 @@ impl LlmPort for OpenAiClient {
             });
         }
         if !resp.status().is_success() {
-            return Err(LlmError::Request(format!("HTTP {}", resp.status())));
+            let hint = if resp.status() == reqwest::StatusCode::NOT_FOUND {
+                format!(" at {} — check that --base-url points at an OpenAI-compatible chat completions endpoint", self.url())
+            } else {
+                String::new()
+            };
+            return Err(LlmError::Request(format!("HTTP {}{hint}", resp.status())));
         }
         let rb: ResponseBody = resp
             .json()
@@ -234,7 +254,10 @@ impl LlmPort for OpenAiClient {
         let first = rb.choices.into_iter().next();
         match first {
             Some(choice) => {
-                let content = choice.message.content.unwrap_or_default();
+                let mut content = choice.message.content.unwrap_or_default();
+                if content.trim().is_empty() && choice.message.tool_calls.is_empty() {
+                    content = choice.message.reasoning_content.unwrap_or_default();
+                }
                 let tool_calls = choice
                     .message
                     .tool_calls
@@ -298,6 +321,7 @@ impl LlmPort for OpenAiClient {
         }
 
         let mut text = String::new();
+        let mut reasoning = String::new();
         let mut prompt_tokens: u64 = 0;
         let mut completion_tokens: u64 = 0;
         // Accumulate tool calls by their stream index.
@@ -352,6 +376,13 @@ impl LlmPort for OpenAiClient {
                             text.push_str(t);
                             sink(StreamEvent::Text(t.to_string()));
                         }
+                        // Reasoning-model channel: accumulate silently so the
+                        // turn isn't empty when a model answers only there.
+                        if let Some(t) =
+                            delta.get("reasoning_content").and_then(|x| x.as_str())
+                        {
+                            reasoning.push_str(t);
+                        }
                         if let Some(tcs) = delta.get("tool_calls").and_then(|x| x.as_array()) {
                             for tc in tcs {
                                 let idx = tc.get("index").and_then(|x| x.as_u64()).unwrap_or(0) as usize;
@@ -384,10 +415,40 @@ impl LlmPort for OpenAiClient {
         for tc in &tool_calls {
             sink(StreamEvent::ToolCall(tc.clone()));
         }
+        if text.trim().is_empty() && tool_calls.is_empty() && !reasoning.trim().is_empty() {
+            sink(StreamEvent::Text(reasoning.clone()));
+            text = reasoning;
+        }
         Ok(AgentResponse {
             content: text,
             usage: TokenUsage::new(prompt_tokens, completion_tokens),
             tool_calls,
         })
+    }
+}
+
+#[cfg(test)]
+mod url_tests {
+    use super::OpenAiClient;
+
+    #[test]
+    fn appends_chat_completions_to_api_roots() {
+        let cases = [
+            ("https://proxy.example/v1", "https://proxy.example/v1/chat/completions"),
+            ("https://proxy.example/v1/", "https://proxy.example/v1/chat/completions"),
+            ("https://proxy.example", "https://proxy.example/chat/completions"),
+            (
+                "https://proxy.example/v1/chat/completions",
+                "https://proxy.example/v1/chat/completions",
+            ),
+            (
+                "https://proxy.example/custom/endpoint",
+                "https://proxy.example/custom/endpoint",
+            ),
+        ];
+        for (input, want) in cases {
+            let c = OpenAiClient::new(input, "k");
+            assert_eq!(c.url(), want, "for input {input}");
+        }
     }
 }
