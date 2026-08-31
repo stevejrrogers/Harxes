@@ -237,7 +237,8 @@ pub fn assemble(
     .with_streaming(true)
     .with_observer(Arc::new(observer))
     .with_todos(todos.clone())
-    .with_command_policy(cfg.commands);
+    .with_command_policy(cfg.commands)
+    .with_hooks(cfg.hooks);
     let mcp_tools: Vec<String> = mcp_hub
         .as_ref()
         .map(|h| {
@@ -306,6 +307,11 @@ impl ApprovalGate {
             .store(on, std::sync::atomic::Ordering::Relaxed);
     }
 
+    /// True when a UI is polling and can resolve requests.
+    pub fn is_interactive(&self) -> bool {
+        self.interactive.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
     pub fn request(&self, description: &str) -> bool {
         if !self.interactive.load(std::sync::atomic::Ordering::Relaxed) {
             return false;
@@ -363,12 +369,20 @@ pub struct GateDecider(pub Arc<ApprovalGate>);
 
 impl harxes_core_domain::ports::PermissionDecider for GateDecider {
     fn decide_write(&self, path: &str) -> bool {
+        // File writes are git-recoverable; without a UI to ask, proceed.
+        if !self.0.is_interactive() {
+            return true;
+        }
         self.0.request(&format!("write {path}"))
     }
     fn decide_bash(&self, command: &str) -> bool {
+        // Dangerous commands are NOT recoverable: deny without a UI.
         self.0.request(&format!("run bash \"{command}\""))
     }
     fn decide_write_diff(&self, path: &str, diff: &str) -> bool {
+        if !self.0.is_interactive() {
+            return true;
+        }
         self.0
             .request(&format!("apply diff to {path}\n\n{diff}"))
     }

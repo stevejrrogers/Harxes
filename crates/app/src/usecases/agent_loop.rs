@@ -57,6 +57,8 @@ pub struct AgentLoop {
     command_policy: harxes_core_domain::domain::value_objects::CommandPolicy,
     /// Runtime-discovered tools (e.g. MCP servers), merged into the tool list.
     dynamic_tools: Option<Arc<dyn harxes_core_domain::ports::DynamicToolPort>>,
+    /// User-configured lifecycle hooks run around tool execution.
+    hooks: harxes_core_domain::ports::HooksConfig,
 }
 
 impl AgentLoop {
@@ -78,7 +80,14 @@ impl AgentLoop {
             todos: None,
             command_policy: Default::default(),
             dynamic_tools: None,
+            hooks: Default::default(),
         }
+    }
+
+    /// Attach user-configured lifecycle hooks.
+    pub fn with_hooks(mut self, hooks: harxes_core_domain::ports::HooksConfig) -> Self {
+        self.hooks = hooks;
+        self
     }
 
     /// Attach a provider of runtime-discovered tools (e.g. MCP servers).
@@ -172,6 +181,13 @@ impl AgentLoop {
                 &Self::preview(call.arguments.as_str(), 80),
             );
         }
+        // pre_tool hooks may veto the call (exit code 2).
+        if let Some(block_reason) = self.run_pre_hooks(call).await {
+            if let Some(obs) = &self.observer {
+                obs.on_tool_result(call.name.as_str(), &Self::preview(&block_reason, 100));
+            }
+            return block_reason;
+        }
         let result = match ToolId::parse(call.name.as_str()) {
             Some(tool) => match parse_args(tool, &call.arguments) {
                 ParsedArgs::Bash { command } => self.run_bash(&command).await,
@@ -203,8 +219,79 @@ impl AgentLoop {
                 _ => format!("unknown tool '{}'", call.name),
             },
         };
+        let result = self.run_post_hooks(call, result).await;
         if let Some(obs) = &self.observer {
             obs.on_tool_result(call.name.as_str(), &Self::preview(result.as_str(), 100));
+        }
+        result
+    }
+
+    /// True when a hook rule's matcher applies to the tool name (empty or `*`
+    /// matches everything; otherwise a case-insensitive `*`-wildcard match).
+    fn hook_matches(matcher: &str, tool: &str) -> bool {
+        let m = matcher.trim().to_lowercase();
+        let t = tool.to_lowercase();
+        if m.is_empty() || m == "*" {
+            return true;
+        }
+        if let Some(prefix) = m.strip_suffix('*') {
+            return t.starts_with(prefix);
+        }
+        t == m
+    }
+
+    /// Shell snippet exporting the tool context for a hook command.
+    fn hook_env(call: &ToolCall) -> String {
+        let esc = |s: &str| s.replace('\'', r"'\''");
+        format!(
+            "export HARXES_TOOL_NAME='{}' HARXES_TOOL_ARGS='{}'; ",
+            esc(call.name.as_str()),
+            esc(call.arguments.as_str())
+        )
+    }
+
+    /// Run matching pre_tool hooks. Returns Some(reason) when a hook blocks
+    /// the call (exit code 2); other exit codes are advisory and ignored.
+    async fn run_pre_hooks(&self, call: &ToolCall) -> Option<String> {
+        use harxes_core_domain::ports::ShellExitStatus;
+        for rule in &self.hooks.pre_tool {
+            if !Self::hook_matches(&rule.matcher, call.name.as_str()) {
+                continue;
+            }
+            let cmd = format!("{}{}", Self::hook_env(call), rule.command);
+            if let Ok(o) = self.shell.run_command(".", &cmd).await {
+                if o.exit_status == ShellExitStatus::Failure(2) {
+                    let why = if o.stderr.trim().is_empty() {
+                        o.stdout.trim().to_string()
+                    } else {
+                        o.stderr.trim().to_string()
+                    };
+                    return Some(format!(
+                        "blocked by pre_tool hook '{}': {}",
+                        rule.command,
+                        if why.is_empty() { "(no reason given)" } else { &why }
+                    ));
+                }
+            }
+        }
+        None
+    }
+
+    /// Run matching post_tool hooks; non-empty stdout is appended to the tool
+    /// result as feedback for the model.
+    async fn run_post_hooks(&self, call: &ToolCall, mut result: String) -> String {
+        for rule in &self.hooks.post_tool {
+            if !Self::hook_matches(&rule.matcher, call.name.as_str()) {
+                continue;
+            }
+            let cmd = format!("{}{}", Self::hook_env(call), rule.command);
+            if let Ok(o) = self.shell.run_command(".", &cmd).await {
+                let out = o.stdout.trim();
+                if !out.is_empty() {
+                    let capped: String = out.chars().take(1000).collect();
+                    result.push_str(&format!("\n[hook feedback] {capped}"));
+                }
+            }
         }
         result
     }
@@ -390,20 +477,34 @@ impl AgentLoop {
             return format!("permission denied: {reason}");
         }
         // Golden-diff review: preview the single hunk before applying.
-        if let Some(d) = &self.decider {
-            if let Ok(old) = self.fsys.read(path).await {
-                if old.contains(old_string) {
-                    let new = old.replacen(old_string, new_string, 1);
-                    let diff =
-                        harxes_core_domain::domain::services::diff::generate_diff(&old, &new);
-                    if !d.decide_write_diff(path, &diff) {
+        let mut applied_diff = String::new();
+        if let Ok(old) = self.fsys.read(path).await {
+            if old.contains(old_string) {
+                let new = old.replacen(old_string, new_string, 1);
+                applied_diff =
+                    harxes_core_domain::domain::services::diff::generate_diff(&old, &new);
+                if let Some(d) = &self.decider {
+                    if !d.decide_write_diff(path, &applied_diff) {
                         return format!("permission denied: edit to {path} was not approved");
                     }
                 }
             }
         }
         match self.fsys.replace(path, old_string, new_string).await {
-            Ok(bytes) => format!("edited {path} ({bytes} bytes written)"),
+            Ok(bytes) => {
+                // Include the applied hunk (capped) so the model can verify
+                // the change without re-reading the file.
+                let mut out = format!("edited {path} ({bytes} bytes written)");
+                if !applied_diff.is_empty() {
+                    let capped: String = applied_diff.chars().take(2000).collect();
+                    out.push('\n');
+                    out.push_str(&capped);
+                    if capped.len() < applied_diff.len() {
+                        out.push_str("\n[diff truncated]");
+                    }
+                }
+                out
+            }
             Err(e) => format!("edit error {e}"),
         }
     }
@@ -471,6 +572,7 @@ impl AgentLoop {
             todos: None,
             command_policy: self.command_policy.clone(),
             dynamic_tools: self.dynamic_tools.clone(),
+            hooks: self.hooks.clone(),
         };
         let limits = LoopLimits {
             max_iterations: 15,
@@ -898,6 +1000,90 @@ mod tests {
             Arc::new(FakeShell),
             Arc::new(FakeFs),
         )
+    }
+
+    /// Shell that fails with exit 2 for commands containing "block-hook".
+    struct HookShell;
+    #[async_trait::async_trait]
+    impl harxes_core_domain::ports::ShellPort for HookShell {
+        async fn run_command(&self, _wd: &str, cmd: &str) -> Result<CommandOutput, ShellError> {
+            if cmd.contains("block-hook") {
+                return Ok(CommandOutput {
+                    stdout: String::new(),
+                    stderr: "not allowed by policy".into(),
+                    exit_status: ShellExitStatus::Failure(2),
+                });
+            }
+            Ok(CommandOutput {
+                stdout: format!("out:{cmd}"),
+                stderr: String::new(),
+                exit_status: ShellExitStatus::Success,
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn pre_tool_hook_blocks_matching_call() {
+        use harxes_core_domain::ports::{HookRule, HooksConfig};
+        let a = AgentLoop::new(
+            Arc::new(FakeLlmScript(Mutex::new(vec![]))),
+            Arc::new(HookShell),
+            Arc::new(FakeFs),
+        )
+        .with_hooks(HooksConfig {
+            pre_tool: vec![HookRule {
+                matcher: "Read".into(),
+                command: "block-hook".into(),
+            }],
+            post_tool: vec![],
+        });
+        let pid = ProviderId::new("x").unwrap();
+        let blocked = a
+            .execute_call(&pid, "m", &ToolCall {
+                id: "1".into(),
+                name: "Read".into(),
+                arguments: r#"{"path":"x.txt"}"#.into(),
+            })
+            .await;
+        assert!(blocked.contains("blocked by pre_tool hook"), "{blocked}");
+        assert!(blocked.contains("not allowed by policy"));
+        // Non-matching tool runs normally.
+        let ok = a
+            .execute_call(&pid, "m", &ToolCall {
+                id: "2".into(),
+                name: "Glob".into(),
+                arguments: r#"{"pattern":"*"}"#.into(),
+            })
+            .await;
+        assert!(!ok.contains("blocked"), "{ok}");
+    }
+
+    #[tokio::test]
+    async fn post_tool_hook_appends_feedback() {
+        use harxes_core_domain::ports::{HookRule, HooksConfig};
+        let a = AgentLoop::new(
+            Arc::new(FakeLlmScript(Mutex::new(vec![]))),
+            Arc::new(FakeShell),
+            Arc::new(FakeFs),
+        )
+        .with_hooks(HooksConfig {
+            pre_tool: vec![],
+            post_tool: vec![HookRule {
+                matcher: "*".into(),
+                command: "lint-check".into(),
+            }],
+        });
+        let pid = ProviderId::new("x").unwrap();
+        let out = a
+            .execute_call(&pid, "m", &ToolCall {
+                id: "1".into(),
+                name: "Read".into(),
+                arguments: r#"{"path":"x.txt"}"#.into(),
+            })
+            .await;
+        assert!(out.starts_with("read:x.txt"), "{out}");
+        assert!(out.contains("[hook feedback]"), "{out}");
+        assert!(out.contains("lint-check"), "{out}");
     }
 
     #[tokio::test]

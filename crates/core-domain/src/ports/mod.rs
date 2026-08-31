@@ -13,8 +13,8 @@ mod tool_observer;
 // Re-exports form the hexagonal "driven interface" surface that infrastructure
 // adapters implement and application services consume.
 pub use config_store::{
-    ConfigStoreError, ConfigStorePort, HarxesConfig, McpServerConfig, ModelPricing,
-    ProviderConfig,
+    ConfigStoreError, ConfigStorePort, HarxesConfig, HookRule, HooksConfig, McpServerConfig,
+    ModelPricing, ProviderConfig,
 };
 pub use dynamic_tools::DynamicToolPort;
 pub use file_system::{FileSystemPort, FsError, GlobOptions, GrepMatch};

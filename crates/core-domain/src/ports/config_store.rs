@@ -32,6 +32,29 @@ pub struct HarxesConfig {
     /// to the model as `mcp__<name>__<tool>`.
     #[serde(default)]
     pub mcp: std::collections::BTreeMap<String, McpServerConfig>,
+    /// Lifecycle hooks run around tool execution.
+    #[serde(default)]
+    pub hooks: HooksConfig,
+}
+
+/// One lifecycle hook: a shell command run around tool execution. `matcher`
+/// filters by tool name (`*` wildcard supported; empty = every tool).
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct HookRule {
+    #[serde(rename = "match", default)]
+    pub matcher: String,
+    pub command: String,
+}
+
+/// Hook sets by lifecycle event. A `pre_tool` hook exiting with code 2 blocks
+/// the tool call (its output becomes the refusal reason shown to the model);
+/// `post_tool` hook output is appended to the tool result as feedback.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct HooksConfig {
+    #[serde(default)]
+    pub pre_tool: Vec<HookRule>,
+    #[serde(default)]
+    pub post_tool: Vec<HookRule>,
 }
 
 /// Launch spec for one stdio MCP server.

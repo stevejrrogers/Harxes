@@ -575,9 +575,17 @@ fn tasks_panel(frame: &mut Frame, state: &AppState, area: Rect) {
             Style::new().fg(Color::Red).add_modifier(Modifier::BOLD),
         )]));
         for ln in p.split('\n') {
+            // Diff-aware coloring so golden-diff approvals read like a diff.
+            let style = if ln.starts_with('+') {
+                Style::new().fg(Color::Green)
+            } else if ln.starts_with('-') {
+                Style::new().fg(Color::Red)
+            } else {
+                Style::new()
+            };
             text.push_line(Line::from(vec![
                 Span::styled("    ", Style::new().fg(Color::DarkGray)),
-                Span::raw(ln.to_string()),
+                Span::styled(ln.to_string(), style),
             ]));
         }
     }

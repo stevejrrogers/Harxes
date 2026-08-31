@@ -81,6 +81,12 @@ turn đang chạy trong TUI.
   Adapter ở `crates/infrastructure/mcp` (JSON-RPC line-delimited, initialize →
   tools/list → tools/call, lỗi kết nối không fatal).
 
+- `hooks`: lifecycle hooks quanh tool execution —
+  `{ "pre_tool": [{"match": "Bash", "command": "..."}], "post_tool": [...] }`.
+  Hook nhận `HARXES_TOOL_NAME`/`HARXES_TOOL_ARGS` qua env; pre_tool exit code 2
+  chặn tool call (output thành lý do cho model thấy); post_tool stdout được nối
+  vào tool result làm feedback. `match` hỗ trợ wildcard `*`.
+
 ## System prompt
 
 `build_system_prompt()` trong `crates/cli/src/main.rs`: identity + môi trường
