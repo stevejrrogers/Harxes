@@ -50,7 +50,7 @@ impl ToolId {
 #[derive(Debug)]
 pub enum ParsedArgs {
     Bash { command: String },
-    Read { path: String },
+    Read { path: String, offset: Option<usize>, limit: Option<usize> },
     Write { path: String, content: String },
     Edit { path: String, old_string: String, new_string: String },
     Grep { needle: String, pattern: String, max_matches: usize },
@@ -69,8 +69,18 @@ pub fn all_tool_specs() -> Vec<ToolSpec> {
         ),
         ToolSpec::with_schema(
             "Read",
-            "Read a file from disk by path.",
-            obj_schema(vec![("path", "string")]),
+            "Read a file from disk by path. Large files are truncated; pass offset (1-based start line) and limit (line count) to page through them.",
+            {
+                serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "path": { "type": "string" },
+                        "offset": { "type": "integer", "description": "1-based line to start from" },
+                        "limit": { "type": "integer", "description": "Max lines to return" }
+                    },
+                    "required": ["path"],
+                })
+            },
         ),
         ToolSpec::with_schema(
             "Write",
@@ -187,8 +197,11 @@ pub fn parse_args(tool: ToolId, raw: &str) -> ParsedArgs {
                 }
                 ToolId::Read => {
                     let path = obj.get("path").and_then(|x| x.as_str()).unwrap_or(raw);
+                    let get_n = |k: &str| obj.get(k).and_then(|x| x.as_u64()).map(|n| n as usize);
                     return ParsedArgs::Read {
                         path: path.to_string(),
+                        offset: get_n("offset"),
+                        limit: get_n("limit"),
                     };
                 }
                 ToolId::Write => {
@@ -286,6 +299,8 @@ pub fn parse_args(tool: ToolId, raw: &str) -> ParsedArgs {
         },
         ToolId::Read => ParsedArgs::Read {
             path: raw.trim().to_string(),
+            offset: None,
+            limit: None,
         },
         ToolId::Write => {
             let (path, content) = match raw.split_once('\n') {
@@ -349,7 +364,7 @@ mod tests {
     #[test]
     fn parse_plain_string_fallback() {
         match parse_args(ToolId::Read, "src/main.rs") {
-            ParsedArgs::Read { path } => assert_eq!(path, "src/main.rs"),
+            ParsedArgs::Read { path, .. } => assert_eq!(path, "src/main.rs"),
             _ => panic!(),
         }
     }

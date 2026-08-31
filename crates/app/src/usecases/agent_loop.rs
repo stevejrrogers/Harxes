@@ -191,7 +191,9 @@ impl AgentLoop {
         let result = match ToolId::parse(call.name.as_str()) {
             Some(tool) => match parse_args(tool, &call.arguments) {
                 ParsedArgs::Bash { command } => self.run_bash(&command).await,
-                ParsedArgs::Read { path } => self.read_file(&path).await,
+                ParsedArgs::Read { path, offset, limit } => {
+                    self.read_file(&path, offset, limit).await
+                }
                 ParsedArgs::Write { path, content } => self.write_file_parts(&path, &content).await,
                 ParsedArgs::Edit {
                     path,
@@ -373,11 +375,29 @@ impl AgentLoop {
                     ShellExitStatus::Success => 0,
                     ShellExitStatus::Failure(c) => c,
                 };
+                // Cap output so one noisy command cannot flood the context;
+                // keep the tail, where errors and summaries usually live.
+                const MAX_STREAM: usize = 20_000;
+                let cap = |s: &str| -> String {
+                    let t = s.trim();
+                    if t.chars().count() <= MAX_STREAM {
+                        return t.to_string();
+                    }
+                    let tail: String = t
+                        .chars()
+                        .rev()
+                        .take(MAX_STREAM)
+                        .collect::<Vec<_>>()
+                        .into_iter()
+                        .rev()
+                        .collect();
+                    format!("[output truncated to last {MAX_STREAM} chars]\n{tail}")
+                };
                 format!(
                     "exit={} stdout={} stderr={}",
                     code,
-                    o.stdout.trim(),
-                    o.stderr.trim()
+                    cap(&o.stdout),
+                    cap(&o.stderr)
                 )
             }
             Err(e) => format!("shell error {e}"),
@@ -399,11 +419,34 @@ impl AgentLoop {
         DANGER_PREFIXES.iter().any(|p| c.starts_with(p))
     }
 
-    async fn read_file(&self, path: &str) -> String {
-        match self.fsys.read(path.trim()).await {
+    /// Default line cap for Read so one huge file cannot flood the context.
+    const READ_DEFAULT_LIMIT: usize = 2000;
+
+    async fn read_file(&self, path: &str, offset: Option<usize>, limit: Option<usize>) -> String {
+        let content = match self.fsys.read(path.trim()).await {
             Ok(c) => c,
-            Err(e) => format!("read error {e}"),
+            Err(e) => return format!("read error {e}"),
+        };
+        let total = content.lines().count();
+        let start = offset.unwrap_or(1).max(1) - 1; // 1-based -> 0-based
+        let limit = limit.unwrap_or(Self::READ_DEFAULT_LIMIT).max(1);
+        if start == 0 && total <= limit {
+            return content;
         }
+        let body: String = content
+            .lines()
+            .skip(start)
+            .take(limit)
+            .collect::<Vec<_>>()
+            .join("\n");
+        let end = (start + limit).min(total);
+        format!(
+            "[showing lines {}-{} of {}; pass offset/limit to read more]\n{}",
+            start + 1,
+            end,
+            total,
+            body
+        )
     }
 
     async fn grep(&self, needle: &str, pattern: &str, max_matches: usize) -> String {
@@ -1068,6 +1111,57 @@ mod tests {
                 exit_status: ShellExitStatus::Success,
             })
         }
+    }
+
+    #[tokio::test]
+    async fn read_pages_large_files() {
+        struct BigFs;
+        #[async_trait::async_trait]
+        impl FileSystemPort for BigFs {
+            async fn read(&self, _p: &str) -> Result<String, FsError> {
+                Ok((1..=5000).map(|i| format!("line{i}")).collect::<Vec<_>>().join("\n"))
+            }
+            async fn write(&self, _p: &str, _c: &str) -> Result<(), FsError> {
+                Ok(())
+            }
+            async fn replace(
+                &self,
+                _p: &str,
+                _o: &str,
+                _n: &str,
+            ) -> Result<usize, FsError> {
+                Ok(0)
+            }
+            async fn glob(
+                &self,
+                _pat: &str,
+                _o: &harxes_core_domain::ports::GlobOptions,
+            ) -> Vec<String> {
+                vec![]
+            }
+            async fn grep(
+                &self,
+                _n: &str,
+                _p: &str,
+                _m: usize,
+            ) -> Result<Vec<harxes_core_domain::ports::GrepMatch>, FsError> {
+                Ok(vec![])
+            }
+        }
+        let a = AgentLoop::new(
+            Arc::new(FakeLlmScript(Mutex::new(vec![]))),
+            Arc::new(FakeShell),
+            Arc::new(BigFs),
+        );
+        // Default cap.
+        let out = a.read_file("big.txt", None, None).await;
+        assert!(out.starts_with("[showing lines 1-2000 of 5000"), "{}", &out[..80]);
+        assert!(out.contains("line2000") && !out.contains("line2001\n"));
+        // Paging.
+        let page = a.read_file("big.txt", Some(4999), Some(10)).await;
+        assert!(page.starts_with("[showing lines 4999-5000 of 5000"));
+        assert!(page.contains("line5000"));
+        // Small enough reads come back raw (FakeFs path in other tests).
     }
 
     #[tokio::test]
