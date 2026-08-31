@@ -294,11 +294,24 @@ fn run_repl(
                     let t = st.status.total_tokens;
                     let ti = st.status.total_input_tokens;
                     let to = st.status.total_output_tokens;
-                    let model = st.status.model.clone();
-                    let cost = estimate_cost(&model, t);
-                    st.lines.push(tui::ChatLine::Agent(format!(
-                        "tokens: {t} (in {ti} / out {to})\nestimated cost: ${cost:.4}",
-                    )));
+                    let mut out = format!("tokens: {t} (in {ti} / out {to})");
+                    // Per-model breakdown (a session can switch models).
+                    let mut rows: Vec<_> = st.status.per_model.iter().collect();
+                    rows.sort_by(|a, b| a.0.cmp(b.0));
+                    let mut total = 0.0;
+                    for (model, (i, o)) in rows {
+                        let c = estimate_cost(model, i + o);
+                        total += c;
+                        out.push_str(&format!(
+                            "\n  {model}: {} (in {i} / out {o}) ~ ${c:.4}",
+                            i + o
+                        ));
+                    }
+                    if total == 0.0 {
+                        total = estimate_cost(&st.status.model, t);
+                    }
+                    out.push_str(&format!("\nestimated cost: ${total:.4}"));
+                    st.lines.push(tui::ChatLine::Agent(out));
                     return;
                 }
                 "/sessions" => {
@@ -720,6 +733,9 @@ fn run_repl(
                         st.status.total_output_tokens += out_tok;
                         st.status.total_tokens += tok;
                         let m = st.status.model.clone();
+                        let e = st.status.per_model.entry(m.clone()).or_insert((0, 0));
+                        e.0 += in_tok;
+                        e.1 += out_tok;
                         st.status.total_cost = estimate_cost(&m, st.status.total_tokens);
                         *trx.borrow_mut() = new_hist;
                         // Auto-tick plan items whose key words appeared.
@@ -763,6 +779,27 @@ fn run_repl(
     );
     if let Err(e) = result {
         eprintln!("harxes tui error: {e}");
+    }
+    // End-of-session usage report, per model.
+    if state.status.total_tokens > 0 {
+        let mut rows: Vec<_> = state.status.per_model.iter().collect();
+        rows.sort_by(|a, b| a.0.cmp(b.0));
+        let mut total = 0.0;
+        println!(
+            "session usage: {} tokens (in {} / out {})",
+            state.status.total_tokens,
+            state.status.total_input_tokens,
+            state.status.total_output_tokens
+        );
+        for (model, (i, o)) in rows {
+            let c = estimate_cost(model, i + o);
+            total += c;
+            println!("  {model}: {} (in {i} / out {o}) ~ ${c:.4}", i + o);
+        }
+        if total == 0.0 {
+            total = estimate_cost(&state.status.model, state.status.total_tokens);
+        }
+        println!("estimated cost: ${total:.4}");
     }
 }
 

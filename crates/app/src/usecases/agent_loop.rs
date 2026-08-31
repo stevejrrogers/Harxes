@@ -372,6 +372,13 @@ impl AgentLoop {
     /// Spawn a fresh sub-agent in its own context to complete `task`, reusing
     /// this agent's filesystem, shell, policy and decider. The sub-agent runs a
     /// dedicated, shorter loop and returns its final text as the tool result.
+    /// Wraps a sub-agent's tool events for the parent observer: names are
+    /// prefixed with an indented `└` per delegation depth, and stream deltas
+    /// are swallowed so nested output cannot garble the parent's live text.
+    fn nested_prefix(depth: usize, name: &str) -> String {
+        format!("{}└ {name}", "  ".repeat(depth.saturating_sub(1)))
+    }
+
     async fn delegate_subtask(
         &self,
         provider_id: &ProviderId,
@@ -407,7 +414,14 @@ impl AgentLoop {
             policy: self.policy.clone(),
             decider: self.decider.clone(),
             session: None,
-            observer: None,
+            // Forward tool activity to the parent's observer, indented per
+            // delegation depth, so sub-agent work is visible in the UI.
+            observer: self.observer.clone().map(|o| {
+                Arc::new(NestedObserver {
+                    inner: o,
+                    depth: self.delegation_depth + 1,
+                }) as Arc<dyn harxes_core_domain::ports::ToolObserver>
+            }),
             stream: false,
             delegation_depth: self.delegation_depth + 1,
             // Sub-agents do not touch the parent's plan: delegated tasks are a
@@ -696,6 +710,29 @@ impl AgentLoop {
     }
 }
 
+/// Observer adapter for delegated sub-agents: relabels tool events with a
+/// nesting prefix and drops stream deltas (see [`AgentLoop::nested_prefix`]).
+struct NestedObserver {
+    inner: Arc<dyn harxes_core_domain::ports::ToolObserver>,
+    depth: usize,
+}
+
+impl harxes_core_domain::ports::ToolObserver for NestedObserver {
+    fn on_tool_start(&self, name: &str, args_preview: &str) {
+        self.inner
+            .on_tool_start(&AgentLoop::nested_prefix(self.depth, name), args_preview);
+    }
+    fn on_tool_result(&self, name: &str, result_preview: &str) {
+        self.inner
+            .on_tool_result(&AgentLoop::nested_prefix(self.depth, name), result_preview);
+    }
+    fn on_retry(&self, wait_secs: u64) {
+        self.inner.on_retry(wait_secs);
+    }
+    // on_stream_delta: default no-op — sub-agent text stays out of the
+    // parent's live stream.
+}
+
 #[async_trait::async_trait]
 impl crate::ports::AgentPort for AgentLoop {
     async fn run(
@@ -934,6 +971,12 @@ mod tests {
             .unwrap();
         // The empty-task delegate is rejected and folded into a subsequent turn.
         assert_eq!(out.final_text, "done");
+    }
+
+    #[test]
+    fn nested_prefix_indents_by_depth() {
+        assert_eq!(AgentLoop::nested_prefix(1, "Bash"), "└ Bash");
+        assert_eq!(AgentLoop::nested_prefix(2, "Read"), "  └ Read");
     }
 
     #[tokio::test]

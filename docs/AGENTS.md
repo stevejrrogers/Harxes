@@ -65,12 +65,14 @@ turn đang chạy trong TUI.
 
 ## Những việc/chỗ còn hở
 
-- Delegate sub-agent chạy ngầm, TUI chưa hiển thị nested tool activity của nó.
-- Chưa có cost/usage report per-model cuối phiên (roadmap Phase 5.4).
+- Bảng giá `estimate_cost` còn thô (flat per-token, thiếu model mới) — cân nhắc
+  tách giá input/output và cho phép override qua config.
 
 (Đã đóng: TUI live streaming — commit 62304cb; Bash child kill khi abort — process
 group + RAII guard trong `infrastructure/shell`; `reasoning_content` — fallback khi
-content rỗng trong adapter OpenAI; đã smoke-test tool-calling loop live qua LiteLLM.)
+content rỗng trong adapter OpenAI; Delegate sub-agent hiển thị nested `└ Tool`
+qua `NestedObserver`; cost/usage report per-model trong `/cost` + khi thoát phiên;
+đã smoke-test tool-calling loop + delegate live qua LiteLLM.)
 
 ## Nguyên tắc xuyên suốt
 

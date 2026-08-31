@@ -67,6 +67,9 @@ pub struct StatusInfo {
     pub total_output_tokens: u64,
     pub tools_used: Vec<String>,
     pub total_cost: f64,
+    /// Per-model usage: model id → (input tokens, output tokens). A session
+    /// can span several models via /model, so cost is reported per model.
+    pub per_model: std::collections::HashMap<String, (u64, u64)>,
     pub cwd: String,
     pub git_branch: Option<String>,
 }
@@ -155,6 +158,7 @@ impl AppState {
                 total_output_tokens: 0,
                 tools_used: vec![],
                 total_cost: 0.0,
+                per_model: Default::default(),
                 cwd: current_dir_label(),
                 git_branch: current_git_branch(),
             },
