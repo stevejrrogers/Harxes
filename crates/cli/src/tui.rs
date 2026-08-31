@@ -972,7 +972,7 @@ fn code_block_lines(lang: &str, code: &str) -> Vec<Line<'static>> {
     out
 }
 
-pub const SLASH_COMMANDS: [&str; 14] = [
+pub const SLASH_COMMANDS: [&str; 15] = [
     "/help",
     "/clear",
     "/cost",
@@ -984,6 +984,7 @@ pub const SLASH_COMMANDS: [&str; 14] = [
     "/remember ",
     "/plan ",
     "/todo",
+    "/init",
     "/theme",
     "/export ",
     "/exit",

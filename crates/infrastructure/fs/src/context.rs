@@ -66,21 +66,45 @@ impl ContextStore {
     fn ensure_agents_dir(&self) -> std::io::Result<()> {
         fs::create_dir_all(self.agents_dir())
     }
-    /// Read the shared AGENTS.md from the project root (parent of .harxes).
+    /// Read the project guide from the project root (parent of .harxes).
+    /// First match wins: HARXES.md, AGENTS.md, CLAUDE.md.
     pub fn read_agents_md(&self) -> String {
-        let p = self.root.parent().map(|d| d.join("AGENTS.md"));
-        match p {
-            Some(f) => std::fs::read_to_string(f).unwrap_or_default(),
-            None => String::new(),
+        let Some(dir) = self.root.parent() else {
+            return String::new();
+        };
+        for name in ["HARXES.md", "AGENTS.md", "CLAUDE.md"] {
+            if let Ok(body) = std::fs::read_to_string(dir.join(name)) {
+                if !body.trim().is_empty() {
+                    return body;
+                }
+            }
         }
+        String::new()
+    }
+
+    /// Read the user-global guide (`~/.harxes/HARXES.md`), applying to every
+    /// project — the analogue of a user-level CLAUDE.md.
+    pub fn read_global_guide(&self) -> String {
+        let home = std::env::var("HOME").unwrap_or_default();
+        if home.is_empty() {
+            return String::new();
+        }
+        std::fs::read_to_string(PathBuf::from(home).join(".harxes").join("HARXES.md"))
+            .unwrap_or_default()
     }
 
     /// Combine session + workspace context into a block for the system prompt.
     pub fn build_context_block(&self, id: &str) -> String {
         let mut out = String::new();
+        let global = self.read_global_guide();
+        if !global.trim().is_empty() {
+            out.push_str("# User guide (~/.harxes/HARXES.md)\n");
+            out.push_str(global.trim());
+            out.push_str("\n\n");
+        }
         let agents_md = self.read_agents_md();
         if !agents_md.trim().is_empty() {
-            out.push_str("# Project guide (AGENTS.md)\n");
+            out.push_str("# Project guide\n");
             out.push_str(agents_md.trim());
             out.push_str("\n\n");
         }
@@ -109,6 +133,25 @@ mod tests {
             std::env::temp_dir().join(format!("harxes-ctx-test-{tag}-{}", std::process::id()));
         let _ = fs::remove_dir_all(&dir);
         dir
+    }
+
+    #[test]
+    fn project_guide_prefers_harxes_md() {
+        let project = tmp_root("guide");
+        let root = project.join(".harxes");
+        fs::create_dir_all(&root).unwrap();
+        let store = ContextStore::new(&root);
+        assert_eq!(store.read_agents_md(), "");
+
+        fs::write(project.join("CLAUDE.md"), "claude guide").unwrap();
+        assert_eq!(store.read_agents_md().trim(), "claude guide");
+        fs::write(project.join("AGENTS.md"), "agents guide").unwrap();
+        assert_eq!(store.read_agents_md().trim(), "agents guide");
+        fs::write(project.join("HARXES.md"), "harxes guide").unwrap();
+        assert_eq!(store.read_agents_md().trim(), "harxes guide");
+        // Empty preferred file falls through to the next candidate.
+        fs::write(project.join("HARXES.md"), "  \n").unwrap();
+        assert_eq!(store.read_agents_md().trim(), "agents guide");
     }
 
     #[test]

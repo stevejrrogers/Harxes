@@ -110,12 +110,21 @@ fn make_pid(wiring: &compose::Wiring) -> ProviderId {
 fn run_one_shot(wiring: &compose::Wiring, cli: &Cli, prompt: &str) {
     let pid = make_pid(wiring);
     let model = resolve_model(wiring, cli);
+    // One-shot runs get the same workspace context (project guide, notes) as
+    // REPL turns, folded into the system prompt.
+    let ctx = ContextStore::new(std::path::PathBuf::from(".harxes"));
+    let mut system = String::from("You are Harxes.");
+    let block = ctx.build_context_block("one-shot");
+    if !block.trim().is_empty() {
+        system.push_str("\n\n");
+        system.push_str(&block);
+    }
     match tokio::runtime::Runtime::new() {
         Ok(rt) => rt.block_on(async {
             wiring.streamed.store(false, std::sync::atomic::Ordering::Relaxed);
             match wiring
                 .agent
-                .run(&pid, &model, "You are Harxes.", prompt, &wiring.limits)
+                .run(&pid, &model, &system, prompt, &wiring.limits)
                 .await
             {
                 Ok(out) => {
@@ -259,11 +268,26 @@ fn run_repl(
                     _ => {}
                 }
             }
+            // `/init` expands into a canned prompt and runs as a normal turn.
+            let t = if t == "/init" {
+                st.lines.push(tui::ChatLine::Tool(
+                    "generating HARXES.md project guide…".into(),
+                ));
+                String::from(
+                    "Explore this repository (use Glob/Read/Grep/Bash as needed) and write a \
+                     concise HARXES.md project guide at the repo root using the Write tool. \
+                     Cover: what the project is, how it is structured, how to build and test it, \
+                     and any conventions a coding agent must follow. Keep it under 60 lines. \
+                     If HARXES.md already exists, improve it instead of starting over.",
+                )
+            } else {
+                t
+            };
             // Slash commands handled here.
             match t.as_str() {
                 "/help" => {
                     st.lines.push(tui::ChatLine::Agent(String ::from("/help      this help\n/clear     clear the screen\n/cost      total tokens used\n/model X   switch model\n/compact   summarize context\n/sessions  list saved sessions\n/remember X save a note to agent memory\n/resume I  load saved session by id\n/plan T    break task T into a checklist
-/theme D|L   switch light/dark theme\n/todo done N   tick item N on the plan\n/export F  write transcript to file F.md\n/cost      tokens + estimated cost\n/exit      quit")));
+/theme D|L   switch light/dark theme\n/todo done N   tick item N on the plan\n/init      generate a HARXES.md project guide\n/export F  write transcript to file F.md\n/cost      tokens + estimated cost\n/exit      quit")));
                     return;
                 }
                 "/cost" => {
