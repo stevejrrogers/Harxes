@@ -382,6 +382,7 @@ mod tests {
     #[test]
     fn approval_gate_blocks_then_resolves() {
         let gate = Arc::new(ApprovalGate::default());
+        gate.set_interactive(true);
         let g2 = gate.clone();
         let worker = std::thread::spawn(move || g2.request("write /tmp/x"));
         // Give the worker a moment to block on the request.
@@ -392,8 +393,17 @@ mod tests {
     }
 
     #[test]
+    fn non_interactive_gate_auto_denies() {
+        let gate = ApprovalGate::default();
+        // No UI marked interactive: must deny immediately, not block.
+        assert!(!gate.request("rm -rf /"));
+        assert!(gate.has_pending().is_none());
+    }
+
+    #[test]
     fn decider_bridges_to_gate() {
         let gate = Arc::new(ApprovalGate::default());
+        gate.set_interactive(true);
         let decider = GateDecider(gate.clone());
         let g2 = gate.clone();
         let worker = std::thread::spawn(move || decider.decide_bash("rm -rf /"));
