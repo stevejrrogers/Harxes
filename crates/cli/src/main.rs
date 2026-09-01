@@ -1035,7 +1035,8 @@ fn tool_preview(name: &str, args: &str) -> String {
     if trimmed.is_empty() {
         name.to_string()
     } else {
-        format!("{name}: {}", &trimmed[..trimmed.len().min(80)])
+        let head: String = trimmed.chars().take(80).collect();
+        format!("{name}: {head}")
     }
 }
 

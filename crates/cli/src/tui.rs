@@ -535,7 +535,12 @@ fn chat_pane(frame: &mut Frame, state: &mut AppState, area: Rect) {
     }
     // typewriter reveal OUTSIDE the per-line loop, once at the end.
     if !state.typing_text.is_empty() {
-        let shown = &state.typing_text[..state.typing_shown.min(state.typing_text.len())];
+        // Floor onto a char boundary: the reveal counter advances in bytes and
+        // must never split a multibyte character (e.g. Vietnamese diacritics).
+        let cut = state
+            .typing_text
+            .floor_char_boundary(state.typing_shown.min(state.typing_text.len()));
+        let shown = &state.typing_text[..cut];
         text.push_line(Line::from(vec![Span::styled(
             "  HARXES ✦",
             Style::new().fg(Color::Magenta).bold(),
@@ -1312,6 +1317,20 @@ mod tests {
             all.contains("hello\u{258b}"),
             "cursor not positioned after 'hello': {all}"
         );
+    }
+
+    #[test]
+    fn typewriter_never_splits_multibyte_chars() {
+        let mut st = AppState::new("p", "m");
+        st.typing_text = "Tôi có thể hỗ trợ bạn viết mã".to_string();
+        let backend = TestBackend::new(80, 20);
+        let mut terminal = Terminal::new(backend).unwrap();
+        // Walk the reveal counter across every byte offset — including ones
+        // inside multibyte characters — and draw each frame.
+        for shown in 0..=st.typing_text.len() {
+            st.typing_shown = shown;
+            terminal.draw(|f| draw(f, &mut st)).unwrap();
+        }
     }
 
     #[test]
