@@ -913,9 +913,19 @@ pub fn run(
         // Advance the frame clock every loop tick so UI animations (blinking
         // cursors) run even when idle.
         state.spinner = state.spinner.wrapping_add(1);
-        // Advance the typewriter reveal by a few chars per frame.
+        // Advance the typewriter reveal. While live-streaming, chase the
+        // incoming text closely (keep only a short animated tail) so the
+        // display never lags behind the model; for batch text an adaptive
+        // step keeps short replies animated and long ones catching up fast.
         if !state.typing_text.is_empty() && state.typing_shown < state.typing_text.len() {
-            state.typing_shown = (state.typing_shown + 3).min(state.typing_text.len());
+            let target = state.typing_text.len();
+            let lag = target - state.typing_shown;
+            let step = if state.streaming_turn && lag > 120 {
+                lag - 80 // snap near the head of the stream
+            } else {
+                (target / 12).max(24)
+            };
+            state.typing_shown = (state.typing_shown + step).min(target);
         } else if !state.typing_text.is_empty() && state.typing_shown >= state.typing_text.len() {
             // done revealing: finalize into a real Agent line.
             let done = std::mem::take(&mut state.typing_text);
@@ -924,7 +934,7 @@ pub fn run(
         }
         poll_events(state);
         terminal.draw(|f| draw(f, state))?;
-        if event::poll(Duration::from_millis(80))? {
+        if event::poll(Duration::from_millis(33))? {
             let ev = event::read()?;
             if let Event::Mouse(me) = &ev {
                 use crossterm::event::MouseEventKind as MK;
