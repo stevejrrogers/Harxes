@@ -142,6 +142,8 @@ pub struct AppState {
     pub live_text: String,
     /// When the in-flight turn started (drives the elapsed-time display).
     pub turn_started: Option<std::time::Instant>,
+    /// Show tool output in full instead of collapsed one-liners (Ctrl+O).
+    pub expand_tools: bool,
 }
 
 impl AppState {
@@ -180,6 +182,7 @@ impl AppState {
             streaming_turn: false,
             live_text: String::new(),
             turn_started: None,
+            expand_tools: false,
         }
     }
 
@@ -241,33 +244,104 @@ impl AppState {
 /// Split a plain-text line into styled spans, honoring markdown bold
 /// (**text**) so agent output reads like a rendered Copilot chat.
 fn markdown_spans(line: &str) -> Vec<Span<'static>> {
-    let mut spans = Vec::new();
-    let mut rest = line;
-    loop {
-        // Heading: up to three # prefix -> bold colored line.
-        let trimmed_head = rest.trim_start();
-        let level = trimmed_head.chars().take_while(|&c| c == '#').count();
-        if (1..=3).contains(&level)
-            && trimmed_head
-                .as_bytes()
-                .get(level)
-                .is_some_and(|b| b.is_ascii_whitespace())
-        {
-            let body = trimmed_head[level..].trim_start();
-            let color = if level == 1 {
-                Color::Magenta
-            } else if level == 2 {
-                Color::Cyan
-            } else {
-                Color::Blue
-            };
-            spans.push(Span::styled(
-                body.to_string(),
-                Style::new().fg(color).bold(),
-            ));
-            return spans;
+    let trimmed_head = line.trim_start();
+    // Heading: up to three # prefix -> bold colored line.
+    let level = trimmed_head.chars().take_while(|&c| c == '#').count();
+    if (1..=3).contains(&level)
+        && trimmed_head
+            .as_bytes()
+            .get(level)
+            .is_some_and(|b| b.is_ascii_whitespace())
+    {
+        let body = trimmed_head[level..].trim_start();
+        let color = if level == 1 {
+            Color::Magenta
+        } else if level == 2 {
+            Color::Cyan
+        } else {
+            Color::Blue
+        };
+        return vec![Span::styled(
+            body.to_string(),
+            Style::new().fg(color).bold(),
+        )];
+    }
+    // Table row: keep cell text, dim the pipes; a |---| separator row
+    // becomes a single dim rule.
+    if trimmed_head.starts_with('|') {
+        let is_sep = trimmed_head
+            .chars()
+            .all(|c| matches!(c, '|' | '-' | ':' | ' '));
+        if is_sep {
+            return vec![Span::styled(
+                line.replace(['-', ':'], "─").to_string(),
+                Style::new().fg(Color::DarkGray),
+            )];
         }
-        // Bold: **text**
+        let mut spans = Vec::new();
+        let indent = &line[..line.len() - trimmed_head.len()];
+        if !indent.is_empty() {
+            spans.push(Span::raw(indent.to_string()));
+        }
+        for (i, cell) in trimmed_head.split('|').enumerate() {
+            if i > 0 {
+                spans.push(Span::styled("│", Style::new().fg(Color::DarkGray)));
+            }
+            if !cell.is_empty() {
+                spans.extend(inline_spans(cell));
+            }
+        }
+        return spans;
+    }
+    // Bullet / numbered list markers get a colored glyph.
+    let mut spans = Vec::new();
+    let mut body = line;
+    if let Some(rest) = trimmed_head.strip_prefix("- ").or_else(|| trimmed_head.strip_prefix("* ")) {
+        let indent = &line[..line.len() - trimmed_head.len()];
+        spans.push(Span::raw(indent.to_string()));
+        spans.push(Span::styled("• ", Style::new().fg(Color::Cyan)));
+        body = rest;
+    } else {
+        let digits = trimmed_head.chars().take_while(|c| c.is_ascii_digit()).count();
+        if digits >= 1 && trimmed_head[digits..].starts_with(". ") {
+            let indent = &line[..line.len() - trimmed_head.len()];
+            spans.push(Span::raw(indent.to_string()));
+            spans.push(Span::styled(
+                trimmed_head[..digits + 2].to_string(),
+                Style::new().fg(Color::Cyan),
+            ));
+            body = &trimmed_head[digits + 2..];
+        }
+    }
+    spans.extend(inline_spans(body));
+    spans
+}
+
+/// Inline styling: `code` spans (yellow) and **bold** runs.
+fn inline_spans(text: &str) -> Vec<Span<'static>> {
+    let mut spans = Vec::new();
+    for (i, seg) in text.split('`').enumerate() {
+        if seg.is_empty() {
+            continue;
+        }
+        if i % 2 == 1 {
+            // Inside backticks: literal code styling.
+            spans.push(Span::styled(
+                seg.to_string(),
+                Style::new().fg(Color::Yellow),
+            ));
+        } else {
+            spans.extend(bold_spans(seg));
+        }
+    }
+    spans
+}
+
+/// Split a plain segment into raw and **bold** spans.
+fn bold_spans(text: &str) -> Vec<Span<'static>> {
+    let mut spans = Vec::new();
+    let mut rest = text;
+    loop {
         match rest.find("**") {
             Some(start) => {
                 if start > 0 {
@@ -286,7 +360,9 @@ fn markdown_spans(line: &str) -> Vec<Span<'static>> {
                 }
             }
             None => {
-                spans.push(Span::raw(rest.to_string()));
+                if !rest.is_empty() {
+                    spans.push(Span::raw(rest.to_string()));
+                }
                 break;
             }
         }
@@ -364,18 +440,36 @@ fn est_lines(state: &AppState, width: usize) -> usize {
     let mut n = 0usize;
     for l in &state.lines {
         match l {
-            ChatLine::User(t) => n += 1 + t.len() / w,
-            ChatLine::Agent(t) => n += 2 + t.len() / w,
-            ChatLine::Tool(_) => n += 1,
+            ChatLine::User(t) => {
+                n += 1 + t.split('\n').map(|l| 1 + l.len() / w).sum::<usize>()
+            }
+            ChatLine::Agent(t) => {
+                // +2 for header/trailing blank; code fences add frame lines.
+                n += 2
+                    + t.split('\n').map(|l| 1 + l.len() / w).sum::<usize>()
+                    + t.matches("```").count();
+            }
+            ChatLine::Tool(t) => {
+                n += if state.expand_tools {
+                    t.split('\n').count()
+                } else {
+                    1
+                }
+            }
         }
     }
     n
 }
 
 fn chat_pane(frame: &mut Frame, state: &mut AppState, area: Rect) {
+    let total = est_lines(state, area.width as usize);
+    let bottom = (total.saturating_sub(area.height as usize)) as u16;
     if state.auto_scroll {
-        let total = est_lines(state, area.width as usize);
-        state.scroll = (total.saturating_sub(area.height as usize)) as u16;
+        state.scroll = bottom;
+    } else if state.scroll >= bottom {
+        // Scrolled back to (or past) the bottom: resume following the tail.
+        state.scroll = bottom;
+        state.auto_scroll = true;
     }
     let mut text = ratatui::text::Text::default();
     for line in &state.lines {
@@ -404,10 +498,38 @@ fn chat_pane(frame: &mut Frame, state: &mut AppState, area: Rect) {
                 text.push_line(Line::raw(""));
             }
             ChatLine::Tool(t) => {
-                text.push_line(Line::from(vec![
-                    Span::styled("  ⏺ ", Style::new().fg(Color::Cyan)),
-                    Span::styled(t.to_string(), Style::new().fg(Color::Gray)),
-                ]));
+                let mut it = t.split('\n');
+                let first = it.next().unwrap_or("");
+                let extra: Vec<&str> = it.collect();
+                if state.expand_tools || extra.is_empty() {
+                    text.push_line(Line::from(vec![
+                        Span::styled("  ⏺ ", Style::new().fg(Color::Cyan)),
+                        Span::styled(first.to_string(), Style::new().fg(Color::Gray)),
+                    ]));
+                    for ln in extra {
+                        // Diff-aware coloring inside expanded tool output.
+                        let style = if ln.starts_with('+') {
+                            Style::new().fg(Color::Green)
+                        } else if ln.starts_with('-') {
+                            Style::new().fg(Color::Red)
+                        } else {
+                            Style::new().fg(Color::Gray)
+                        };
+                        text.push_line(Line::from(vec![
+                            Span::raw("    "),
+                            Span::styled(ln.to_string(), style),
+                        ]));
+                    }
+                } else {
+                    text.push_line(Line::from(vec![
+                        Span::styled("  ⏺ ", Style::new().fg(Color::Cyan)),
+                        Span::styled(first.to_string(), Style::new().fg(Color::Gray)),
+                        Span::styled(
+                            format!("  … +{} lines (^O)", extra.len()),
+                            Style::new().fg(Color::DarkGray),
+                        ),
+                    ]));
+                }
             }
         }
     }
@@ -430,7 +552,7 @@ fn chat_pane(frame: &mut Frame, state: &mut AppState, area: Rect) {
 
     let para = Paragraph::new(text)
         .style(Style::default())
-        .wrap(ratatui::widgets::Wrap { trim: true })
+        .wrap(ratatui::widgets::Wrap { trim: false })
         .scroll((state.scroll, 0));
     frame.render_widget(para, area);
 }
@@ -716,7 +838,7 @@ fn input_pane(frame: &mut Frame, state: &AppState, area: Rect) {
     if area.height >= 3 {
         lines.push(Line::raw(""));
         lines.push(Line::from(vec![Span::styled(
-            "  Enter send · Alt+Enter newline · ←→ move · Up/Down history · Esc quit",
+            "  Enter send · Alt+Enter newline · ^O expand tools · PgUp/mouse scroll · Esc quit",
             Style::new().fg(Color::DarkGray),
         )]));
     }
@@ -777,6 +899,11 @@ pub fn run(
         Ok(t) => t,
         Err(e) => return Err(format!("cannot init terminal: {e}").into()),
     };
+    // Mouse wheel scrolls the chat pane; best-effort (some terminals refuse).
+    let _ = crossterm::execute!(
+        std::io::stdout(),
+        crossterm::event::EnableMouseCapture
+    );
     loop {
         // Advance the frame clock every loop tick so UI animations (blinking
         // cursors) run even when idle.
@@ -793,7 +920,29 @@ pub fn run(
         poll_events(state);
         terminal.draw(|f| draw(f, state))?;
         if event::poll(Duration::from_millis(80))? {
-            if let Event::Key(k) = event::read()? {
+            let ev = event::read()?;
+            if let Event::Mouse(me) = &ev {
+                use crossterm::event::MouseEventKind as MK;
+                match me.kind {
+                    MK::ScrollUp => {
+                        state.auto_scroll = false;
+                        state.scroll = state.scroll.saturating_sub(3);
+                    }
+                    MK::ScrollDown => {
+                        state.scroll += 3;
+                    }
+                    _ => {}
+                }
+                continue;
+            }
+            if let Event::Key(k) = ev {
+                if k.modifiers
+                    .contains(crossterm::event::KeyModifiers::CONTROL)
+                    && k.code == KeyCode::Char('o')
+                {
+                    state.expand_tools = !state.expand_tools;
+                    continue;
+                }
                 if k.modifiers
                     .contains(crossterm::event::KeyModifiers::CONTROL)
                     && k.code == KeyCode::Char('c')
@@ -949,13 +1098,12 @@ pub fn run(
                             }
                         }
                     }
-                    // Chat scroll
-                    KeyCode::PageDown => {
+                    // Chat scroll (scroll = lines hidden above the viewport).
+                    KeyCode::PageUp => {
                         state.auto_scroll = false;
                         state.scroll = state.scroll.saturating_sub(5);
                     }
-                    KeyCode::PageUp => {
-                        state.auto_scroll = false;
+                    KeyCode::PageDown => {
                         state.scroll += 5;
                     }
                     KeyCode::Esc => {
@@ -982,6 +1130,10 @@ pub fn run(
             }
         }
     }
+    let _ = crossterm::execute!(
+        std::io::stdout(),
+        crossterm::event::DisableMouseCapture
+    );
     ratatui::restore();
     Ok(())
 }
@@ -1163,6 +1315,21 @@ mod tests {
     }
 
     #[test]
+    fn markdown_lists_tables_and_inline_code() {
+        let bullet = markdown_spans("- hello **world**");
+        assert_eq!(bullet[0].content, "");
+        assert_eq!(bullet[1].content, "• ");
+        let numbered = markdown_spans("2. step");
+        assert!(numbered.iter().any(|sp| sp.content == "2. "));
+        let code = markdown_spans("run `cargo test` now");
+        assert!(code.iter().any(|sp| sp.content == "cargo test"));
+        let sep = markdown_spans("|---|---|");
+        assert!(sep[0].content.contains("─"));
+        let row = markdown_spans("| a | b |");
+        assert!(row.iter().filter(|sp| sp.content == "│").count() >= 2);
+    }
+
+    #[test]
     fn draw_is_stable_across_tricky_input_states() {
         use ratatui::{backend::TestBackend, Terminal};
         let mut st = AppState::new("litellm", "DeepSeek-V4-Flash");
@@ -1199,6 +1366,12 @@ mod tests {
             "## Plan\nI will **build** and run it.\n```rust\nfn main(){}\n```".into(),
         ));
         st.lines.push(ChatLine::Tool("Bash echo hi".into()));
+        st.lines.push(ChatLine::Tool(
+            "Edit main.rs\n+ added line\n- removed line\n context".into(),
+        ));
+        st.lines.push(ChatLine::Agent(
+            "- first point\n2. second `inline` point\n| a | b |\n|---|---|\n| 1 | 2 |".into(),
+        ));
         st.input = "line one\nline two".to_string();
         st.set_plan(vec![
             "write code".to_string(),
@@ -1228,5 +1401,23 @@ mod tests {
         let out = lines.join("\n");
         std::fs::write("/tmp/harxes_tui_frame.txt", out).unwrap();
         assert!(lines.len() > 5);
+
+        // Second frame: expanded tools, no completions popup.
+        st.input.clear();
+        update_completions(&mut st);
+        st.expand_tools = true;
+        st.typing_text.clear();
+        terminal.draw(|f| draw(f, &mut st)).unwrap();
+        let buf = terminal.backend().buffer();
+        let area = buf.area;
+        let mut lines2 = Vec::new();
+        for y in 0..area.height {
+            let mut row = String::new();
+            for x in 0..area.width {
+                row.push(buf[(x, y)].symbol().chars().next().unwrap_or(' '));
+            }
+            lines2.push(row.trim_end().to_string());
+        }
+        std::fs::write("/tmp/harxes_tui_frame2.txt", lines2.join("\n")).unwrap();
     }
 }
