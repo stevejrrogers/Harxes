@@ -140,6 +140,8 @@ pub struct AppState {
     pub streaming_turn: bool,
     /// Accumulated streamed text of the current turn (authoritative final text).
     pub live_text: String,
+    /// When the in-flight turn started (drives the elapsed-time display).
+    pub turn_started: Option<std::time::Instant>,
 }
 
 impl AppState {
@@ -177,6 +179,7 @@ impl AppState {
             theme: PaneTheme::dark(),
             streaming_turn: false,
             live_text: String::new(),
+            turn_started: None,
         }
     }
 
@@ -323,17 +326,29 @@ fn agent_lines(text: &str) -> Vec<Line<'static>> {
                     let mut lang_hint = String::new();
                     if let Some(nl) = body.find('\n') {
                         lang_hint = body[..nl].trim().to_string();
-                        if !lang_hint.is_empty() {
-                            out.push(Line::from(vec![Span::styled(
-                                format!("[{}]", lang_hint),
-                                Style::new().fg(Color::Yellow).bold(),
-                            )]));
+                        {
+                            let label = if lang_hint.is_empty() {
+                                "code".to_string()
+                            } else {
+                                lang_hint.clone()
+                            };
+                            out.push(Line::from(vec![
+                                Span::styled("  ╭─ ", Style::new().fg(Color::DarkGray)),
+                                Span::styled(label, Style::new().fg(Color::Yellow)),
+                            ]));
                         }
                         body = &body[nl + 1..];
                     }
                     for l in code_block_lines(&lang_hint, body) {
-                        out.push(l);
+                        let mut spans =
+                            vec![Span::styled("  │ ", Style::new().fg(Color::DarkGray))];
+                        spans.extend(l.spans);
+                        out.push(Line::from(spans));
                     }
+                    out.push(Line::from(vec![Span::styled(
+                        "  ╰─",
+                        Style::new().fg(Color::DarkGray),
+                    )]));
                     rest = &rest[e + 3..];
                 } else {
                     break;
@@ -390,8 +405,8 @@ fn chat_pane(frame: &mut Frame, state: &mut AppState, area: Rect) {
             }
             ChatLine::Tool(t) => {
                 text.push_line(Line::from(vec![
-                    Span::styled("  ⏻ ", Style::new().fg(Color::DarkGray)),
-                    Span::raw(t.to_string()),
+                    Span::styled("  ⏺ ", Style::new().fg(Color::Cyan)),
+                    Span::styled(t.to_string(), Style::new().fg(Color::Gray)),
                 ]));
             }
         }
@@ -420,26 +435,52 @@ fn chat_pane(frame: &mut Frame, state: &mut AppState, area: Rect) {
     frame.render_widget(para, area);
 }
 
+/// Human-friendly token count: 950, 12.3k, 1.2M.
+fn fmt_tokens(n: u64) -> String {
+    if n >= 1_000_000 {
+        format!("{:.1}M", n as f64 / 1_000_000.0)
+    } else if n >= 1_000 {
+        format!("{:.1}k", n as f64 / 1_000.0)
+    } else {
+        n.to_string()
+    }
+}
+
+/// Truncate from the LEFT with a leading ellipsis so the tail (most specific
+/// part of a path) stays visible.
+fn truncate_left(s: &str, max: usize) -> String {
+    let n = s.chars().count();
+    if n <= max {
+        return s.to_string();
+    }
+    let tail: String = s.chars().skip(n - max.saturating_sub(1)).collect();
+    format!("…{tail}")
+}
+
 fn status_panel(frame: &mut Frame, state: &AppState, area: Rect) {
     let mut text = ratatui::text::Text::default();
-    let (dot_col, dot_txt) = if state.processing {
-        (
-            Color::Yellow,
-            if state.spinner.is_multiple_of(2) {
-                "●"
-            } else {
-                "○"
-            },
-        )
-    } else {
-        (Color::Green, "●")
-    };
 
-    // Header: working dot + model, then a separator.
-    text.push_line(Line::from(vec![Span::styled(
-        format!("  {} WORKING", dot_txt),
-        Style::new().fg(dot_col).bold(),
-    )]));
+    // Header: state dot + elapsed time while working.
+    if state.processing {
+        const SPIN: [char; 4] = ['⠋', '⠙', '⠸', '⠴'];
+        let secs = state
+            .turn_started
+            .map(|t| t.elapsed().as_secs())
+            .unwrap_or(0);
+        text.push_line(Line::from(vec![Span::styled(
+            format!(
+                "  {} WORKING · {}s",
+                SPIN[state.spinner as usize % SPIN.len()],
+                secs
+            ),
+            Style::new().fg(Color::Yellow).bold(),
+        )]));
+    } else {
+        text.push_line(Line::from(vec![Span::styled(
+            "  ● READY",
+            Style::new().fg(Color::Green).bold(),
+        )]));
+    }
     text.push_line(Line::from(vec![Span::styled(
         format!("   {}", state.status.model),
         Style::new().fg(Color::Blue).bold(),
@@ -450,10 +491,12 @@ fn status_panel(frame: &mut Frame, state: &AppState, area: Rect) {
         Style::new().fg(Color::DarkGray),
     )]));
 
-    // cwd + git branch.
+    // cwd + git branch. Truncate the path from the left so the panel never
+    // clips it mid-word without warning.
+    let dir_room = (area.width as usize).saturating_sub(13).max(8);
     text.push_line(Line::from(vec![
         Span::styled("  dir      ", Style::new().fg(Color::DarkGray)),
-        Span::raw(state.status.cwd.clone()),
+        Span::raw(truncate_left(&state.status.cwd, dir_room)),
     ]));
     if let Some(b) = &state.status.git_branch {
         text.push_line(Line::from(vec![
@@ -468,22 +511,24 @@ fn status_panel(frame: &mut Frame, state: &AppState, area: Rect) {
         Span::styled(state.status.provider.clone(), Style::new().fg(Color::Cyan)),
     ]));
 
-    // Token usage as a compact progress-style block.
-    text.push_line(Line::from(vec![Span::styled(
-        "  tokens",
-        Style::new().fg(Color::Yellow).bold(),
-    )]));
-    text.push_line(Line::from(vec![Span::styled(
-        format!(
-            "   {}  (in {}/out {})",
-            state.status.total_tokens,
-            state.status.total_input_tokens,
-            state.status.total_output_tokens
-        ),
-        Style::new().fg(Color::DarkGray),
-    )]));
+    // Token usage on one compact line.
     text.push_line(Line::from(vec![
-        Span::styled("  cost      ", Style::new().fg(Color::DarkGray)),
+        Span::styled("  tokens   ", Style::new().fg(Color::DarkGray)),
+        Span::styled(
+            fmt_tokens(state.status.total_tokens),
+            Style::new().fg(Color::Yellow).bold(),
+        ),
+        Span::styled(
+            format!(
+                " (↑{} ↓{})",
+                fmt_tokens(state.status.total_input_tokens),
+                fmt_tokens(state.status.total_output_tokens)
+            ),
+            Style::new().fg(Color::DarkGray),
+        ),
+    ]));
+    text.push_line(Line::from(vec![
+        Span::styled("  cost     ", Style::new().fg(Color::DarkGray)),
         Span::styled(
             format!("${:.4}", state.status.total_cost),
             Style::new().fg(Color::Green).bold(),
@@ -595,16 +640,18 @@ fn tasks_panel(frame: &mut Frame, state: &AppState, area: Rect) {
             Err(_) => vec![],
         }
     };
+    const LIVE_SPIN: [char; 4] = ['⠋', '⠙', '⠸', '⠴'];
+    let live_dot = LIVE_SPIN[state.spinner as usize % LIVE_SPIN.len()];
     if !live.is_empty() {
         for t in live.iter().take(4) {
             text.push_line(Line::from(vec![
-                Span::styled("  ⠿ ", Style::new().fg(Color::Yellow)),
+                Span::styled(format!("  {live_dot} "), Style::new().fg(Color::Yellow)),
                 Span::raw(t.to_string()),
             ]));
         }
     } else if state.processing {
         text.push_line(Line::from(vec![Span::styled(
-            "  ⠿ working...",
+            format!("  {live_dot} thinking…"),
             Style::new().fg(Color::Yellow),
         )]));
     }
@@ -681,6 +728,12 @@ fn input_pane(frame: &mut Frame, state: &AppState, area: Rect) {
 }
 
 pub fn draw(frame: &mut Frame, state: &mut AppState) {
+    // Track when the current turn began so the header can show elapsed time.
+    if state.processing && state.turn_started.is_none() {
+        state.turn_started = Some(std::time::Instant::now());
+    } else if !state.processing {
+        state.turn_started = None;
+    }
     let area = frame.area();
     let cols = Layout::default()
         .direction(Direction::Horizontal)
@@ -703,11 +756,14 @@ pub fn draw(frame: &mut Frame, state: &mut AppState) {
     input_pane(frame, state, left[1]);
     status_panel(frame, state, status_area);
     tasks_panel(frame, state, tasks_area);
+    // Float the menu just ABOVE the input pane so it never covers what the
+    // user is typing or the hint bar.
+    let menu_h = (state.completions.len().min(5) as u16) + 2;
     completion_menu(
         frame,
         &state.completions,
         state.completion_sel,
-        left[0].y.saturating_add(left[0].height),
+        left[1].y.saturating_sub(menu_h),
     );
 }
 
