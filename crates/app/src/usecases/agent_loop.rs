@@ -61,6 +61,9 @@ pub struct AgentLoop {
     hooks: harxes_core_domain::ports::HooksConfig,
     /// Web fetcher backing the `Fetch` tool (optional).
     web: Option<Arc<dyn harxes_core_domain::ports::WebPort>>,
+    /// Models to fail over to (in order) when the primary model errors out
+    /// terminally after retries.
+    fallback_models: Vec<String>,
 }
 
 impl AgentLoop {
@@ -84,7 +87,14 @@ impl AgentLoop {
             dynamic_tools: None,
             hooks: Default::default(),
             web: None,
+            fallback_models: Vec::new(),
         }
+    }
+
+    /// Configure ordered fallback models used when the primary model fails.
+    pub fn with_fallback_models(mut self, models: Vec<String>) -> Self {
+        self.fallback_models = models;
+        self
     }
 
     /// Attach a web fetcher enabling the `Fetch` tool.
@@ -685,6 +695,7 @@ impl AgentLoop {
             dynamic_tools: self.dynamic_tools.clone(),
             hooks: self.hooks.clone(),
             web: self.web.clone(),
+            fallback_models: self.fallback_models.clone(),
         };
         let limits = LoopLimits {
             max_iterations: 15,
@@ -752,6 +763,44 @@ impl AgentLoop {
     /// `retry_after` hint when present. Auth and timeout errors are terminal
     /// and returned immediately. When streaming is enabled, text deltas are
     /// pushed to the observer in real time.
+    /// Call the primary model with retries; on terminal failure walk the
+    /// configured fallback models in order. Auth errors are not failed over
+    /// (the key is broken for every model alike).
+    async fn generate_with_failover(
+        &self,
+        provider_id: &ProviderId,
+        model_id: &str,
+        transcript: &[Message],
+        tools: &[ToolSpec],
+    ) -> Result<AgentResponse, LlmError> {
+        let primary_err = match self
+            .retry_generate(provider_id, model_id, transcript, tools, 3)
+            .await
+        {
+            Ok(r) => return Ok(r),
+            Err(e @ LlmError::Auth { .. }) => return Err(e),
+            Err(e) => e,
+        };
+        for fb in &self.fallback_models {
+            if fb == model_id {
+                continue;
+            }
+            if let Some(obs) = &self.observer {
+                obs.on_tool_start("Failover", &format!("{model_id} failed — trying {fb}"));
+            }
+            match self.retry_generate(provider_id, fb, transcript, tools, 2).await {
+                Ok(r) => {
+                    if let Some(obs) = &self.observer {
+                        obs.on_tool_result("Failover", &format!("continuing on {fb}"));
+                    }
+                    return Ok(r);
+                }
+                Err(_) => continue,
+            }
+        }
+        Err(primary_err)
+    }
+
     async fn retry_generate(
         &self,
         provider_id: &ProviderId,
@@ -864,7 +913,7 @@ impl AgentLoop {
                 );
             }
             let resp = self
-                .retry_generate(provider_id, model_id, &transcript, &tools, 3)
+                .generate_with_failover(provider_id, model_id, &transcript, &tools)
                 .await?;
             total_tokens += resp.usage.total_tokens;
             total_input += resp.usage.input_tokens;
@@ -1135,6 +1184,45 @@ mod tests {
                 exit_status: ShellExitStatus::Success,
             })
         }
+    }
+
+    #[tokio::test]
+    async fn failover_switches_models_on_terminal_error() {
+        use harxes_core_domain::ports::LlmError;
+        /// Fails every call for model "primary"; answers on "backup".
+        struct PickyLlm;
+        #[async_trait::async_trait]
+        impl LlmPort for PickyLlm {
+            async fn generate(
+                &self,
+                _p: &ProviderId,
+                model_id: &str,
+                _m: &[Message],
+                _t: &[ToolSpec],
+                _temp: Option<f64>,
+            ) -> Result<AgentResponse, LlmError> {
+                if model_id == "backup" {
+                    Ok(AgentResponse::text("rescued", Default::default()))
+                } else {
+                    Err(LlmError::Request("boom".into()))
+                }
+            }
+        }
+        let a = AgentLoop::new(Arc::new(PickyLlm), Arc::new(FakeShell), Arc::new(FakeFs))
+            .with_fallback_models(vec!["backup".into()]);
+        let pid = ProviderId::new("x").unwrap();
+        let out = a
+            .run(&pid, "primary", "sys", "hi", &LoopLimits::default())
+            .await
+            .unwrap();
+        assert_eq!(out.final_text, "rescued");
+
+        // Without fallbacks the primary error surfaces.
+        let a2 = AgentLoop::new(Arc::new(PickyLlm), Arc::new(FakeShell), Arc::new(FakeFs));
+        assert!(a2
+            .run(&pid, "primary", "sys", "hi", &LoopLimits::default())
+            .await
+            .is_err());
     }
 
     #[tokio::test]

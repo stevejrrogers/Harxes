@@ -35,6 +35,9 @@ pub struct HarxesConfig {
     /// Lifecycle hooks run around tool execution.
     #[serde(default)]
     pub hooks: HooksConfig,
+    /// Ordered fallback models tried when the primary model fails terminally.
+    #[serde(default)]
+    pub fallback_models: Vec<String>,
 }
 
 /// One lifecycle hook: a shell command run around tool execution. `matcher`

@@ -239,7 +239,8 @@ pub fn assemble(
     .with_todos(todos.clone())
     .with_command_policy(cfg.commands)
     .with_hooks(cfg.hooks)
-    .with_web(Arc::new(harxes_infra_web::ReqwestWeb::default()));
+    .with_web(Arc::new(harxes_infra_web::ReqwestWeb::default()))
+    .with_fallback_models(cfg.fallback_models.clone());
     let mcp_tools: Vec<String> = mcp_hub
         .as_ref()
         .map(|h| {
