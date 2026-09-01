@@ -539,6 +539,11 @@ fn run_repl(
                                ))),
                            }
                        }
+                       Some("clear") => {
+                           wiring.todos.lock().unwrap().clear();
+                           st.plan.clear();
+                           st.lines.push(tui::ChatLine::Tool("plan cleared".into()));
+                       }
                        Some("add") => {
                            let label = arg
                                .strip_prefix("add")
@@ -593,7 +598,7 @@ fn run_repl(
                            }
                        }
                        _ => st.lines.push(tui::ChatLine::Agent(String::from(
-                           "usage: /todo done <n> | /todo add <text> | /todo list",
+                           "usage: /todo done <n> | /todo add <text> | /todo list | /todo clear",
                        ))),
                    }
                    return;
@@ -757,21 +762,10 @@ fn run_repl(
             }
             st.lines.push(tui::ChatLine::User(msg.clone()));
             st.processing = true;
-            // Auto-propose a plan for a new task (only when none is active yet).
-            if st.plan.is_empty() && t.split_whitespace().count() > 2 {
-                let cur_model2 = model_cell.borrow().clone();
-                let pid3 = make_pid(wiring);
-                let labels =
-                    rt.block_on(generate_plan(wiring.agent.clone(), &pid3, &cur_model2, &t));
-                if !labels.is_empty() {
-                    st.set_plan(labels.clone());
-                    *wiring.todos.lock().unwrap() = seed_todos(labels);
-                    for (i, it) in st.plan.iter().enumerate() {
-                        st.lines
-                            .push(tui::ChatLine::Tool(format!("{} [ ] {}", i + 1, it.label)));
-                    }
-                }
-            }
+            // No auto-planning here: the agent plans for itself via the Todo
+            // tool when a task warrants it (an upfront blocking generate_plan
+            // call doubled latency and turned conversational messages into
+            // garbage plans). Explicit /plan remains available.
             if trx.borrow().len() > 60 {
                 st.lines.push(tui::ChatLine::Tool(
                     "context is getting long — consider /compact".into(),
