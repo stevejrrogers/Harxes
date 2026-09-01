@@ -229,6 +229,13 @@ impl AgentLoop {
                     },
                     None => "fetch error: web access is not available".to_string(),
                 },
+                ParsedArgs::Search { query } => match &self.web {
+                    Some(w) => match w.search(&query).await {
+                        Ok(text) => text,
+                        Err(e) => format!("search error: {e}"),
+                    },
+                    None => "search error: web access is not available".to_string(),
+                },
             },
             None => match &self.dynamic_tools {
                 Some(d) if d.owns(call.name.as_str()) => {
@@ -250,7 +257,7 @@ impl AgentLoop {
         use harxes_core_domain::domain::services::tool_protocol::ToolId;
         matches!(
             ToolId::parse(name),
-            Some(ToolId::Read | ToolId::Grep | ToolId::Glob | ToolId::Fetch)
+            Some(ToolId::Read | ToolId::Grep | ToolId::Glob | ToolId::Fetch | ToolId::Search)
         )
     }
 

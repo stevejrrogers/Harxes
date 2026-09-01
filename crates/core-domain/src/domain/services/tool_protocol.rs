@@ -17,6 +17,7 @@ pub enum ToolId {
     Delegate,
     Todo,
     Fetch,
+    Search,
 }
 
 impl ToolId {
@@ -31,6 +32,7 @@ impl ToolId {
             ToolId::Delegate => "Delegate",
             ToolId::Todo => "Todo",
             ToolId::Fetch => "Fetch",
+            ToolId::Search => "Search",
         }
     }
     pub fn parse(name: &str) -> Option<ToolId> {
@@ -44,6 +46,7 @@ impl ToolId {
             "Delegate" | "delegate" => Some(ToolId::Delegate),
             "Todo" | "todo" => Some(ToolId::Todo),
             "Fetch" | "fetch" | "WebFetch" | "webfetch" => Some(ToolId::Fetch),
+            "Search" | "search" | "WebSearch" | "websearch" => Some(ToolId::Search),
             _ => None,
         }
     }
@@ -61,6 +64,7 @@ pub enum ParsedArgs {
     Delegate { task: String, context: Option<String> },
     Todo { action: TodoAction, items: Vec<TodoItem> },
     Fetch { url: String },
+    Search { query: String },
 }
 
 /// The full set of tool specifications offered to the model.
@@ -167,6 +171,11 @@ pub fn all_tool_specs() -> Vec<ToolSpec> {
             },
         ),
         ToolSpec::with_schema(
+            "Search",
+            "Search the web and get a ranked list of results (title, URL, snippet). Follow up with Fetch on promising URLs.",
+            obj_schema(vec![("query", "string")]),
+        ),
+        ToolSpec::with_schema(
             "Fetch",
             "Fetch a web page or API over HTTP GET and return its readable text (HTML is reduced to text, output is capped). Use for documentation, references and public APIs.",
             obj_schema(vec![("url", "string")]),
@@ -269,6 +278,12 @@ pub fn parse_args(tool: ToolId, raw: &str) -> ParsedArgs {
                         url: url.to_string(),
                     };
                 }
+                ToolId::Search => {
+                    let query = obj.get("query").and_then(|x| x.as_str()).unwrap_or(raw);
+                    return ParsedArgs::Search {
+                        query: query.to_string(),
+                    };
+                }
                 ToolId::Todo => {
                     let action = obj
                         .get("action")
@@ -348,6 +363,9 @@ pub fn parse_args(tool: ToolId, raw: &str) -> ParsedArgs {
         },
         ToolId::Fetch => ParsedArgs::Fetch {
             url: raw.trim().to_string(),
+        },
+        ToolId::Search => ParsedArgs::Search {
+            query: raw.trim().to_string(),
         },
         ToolId::Todo => ParsedArgs::Todo {
             action: TodoAction::List,

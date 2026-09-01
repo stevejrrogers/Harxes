@@ -77,6 +77,95 @@ impl WebPort for ReqwestWeb {
             Ok(capped)
         }
     }
+
+    /// Key-free web search over DuckDuckGo's lite HTML endpoint.
+    async fn search(&self, query: &str) -> Result<String, String> {
+        let q = query.trim();
+        if q.is_empty() {
+            return Err("empty search query".to_string());
+        }
+        let url = format!("https://lite.duckduckgo.com/lite/?q={}", percent_encode(q));
+        let html = self.fetch_raw(&url).await?;
+        let results = parse_ddg_lite(&html, 8);
+        if results.is_empty() {
+            return Ok(format!("no results found for '{q}'"));
+        }
+        let mut out = String::new();
+        for (i, (title, href, snippet)) in results.iter().enumerate() {
+            out.push_str(&format!("{}. {title}\n   {href}\n", i + 1));
+            if !snippet.trim().is_empty() {
+                out.push_str(&format!("   {}\n", snippet.trim()));
+            }
+        }
+        Ok(out.trim_end().to_string())
+    }
+}
+
+impl ReqwestWeb {
+    async fn fetch_raw(&self, url: &str) -> Result<String, String> {
+        let resp = self
+            .http
+            .get(url)
+            .send()
+            .await
+            .map_err(|e| format!("request failed: {e}"))?;
+        if !resp.status().is_success() {
+            return Err(format!("HTTP {} for {url}", resp.status()));
+        }
+        let body = resp.bytes().await.map_err(|e| format!("read failed: {e}"))?;
+        Ok(String::from_utf8_lossy(&body[..body.len().min(MAX_BODY_BYTES)]).to_string())
+    }
+}
+
+fn percent_encode(s: &str) -> String {
+    let mut out = String::new();
+    for b in s.bytes() {
+        match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                out.push(b as char)
+            }
+            b' ' => out.push('+'),
+            _ => out.push_str(&format!("%{b:02X}")),
+        }
+    }
+    out
+}
+
+/// Parse DuckDuckGo lite results: anchors with `rel="nofollow"` are result
+/// links; the following `result-snippet` cell (when present) is the summary.
+fn parse_ddg_lite(html: &str, max: usize) -> Vec<(String, String, String)> {
+    let mut results = Vec::new();
+    let mut rest = html;
+    while results.len() < max {
+        let Some(a) = rest.find("rel=\"nofollow\" href=\"") else { break };
+        let after = &rest[a + "rel=\"nofollow\" href=\"".len()..];
+        let Some(hend) = after.find('"') else { break };
+        let href = &after[..hend];
+        let after_tag = &after[hend..];
+        let title = after_tag
+            .find('>')
+            .and_then(|o| {
+                let t = &after_tag[o + 1..];
+                t.find("</a>").map(|e| html_to_text(&t[..e]))
+            })
+            .unwrap_or_default();
+        let tail = &after_tag[after_tag.find("</a>").map(|e| e + 4).unwrap_or(0)..];
+        let snippet = tail
+            .find("result-snippet")
+            .and_then(|s| {
+                let t = &tail[s..];
+                let start = t.find('>')?;
+                let end = t.find("</td>")?;
+                Some(html_to_text(&t[start + 1..end]))
+            })
+            .unwrap_or_default();
+        // Skip ad/redirect-less junk links.
+        if href.starts_with("http") && !title.trim().is_empty() {
+            results.push((title, href.to_string(), snippet));
+        }
+        rest = tail;
+    }
+    results
 }
 
 fn looks_like_html(s: &str) -> bool {
@@ -173,6 +262,27 @@ mod tests {
         assert!(text.contains("Second para"));
         assert!(!text.contains("alert(1)"), "script leaked: {text}");
         assert!(!text.contains("color:red"), "style leaked: {text}");
+    }
+
+    #[test]
+    fn ddg_lite_results_parse() {
+        let html = r#"<table>
+          <tr><td>1.</td><td><a rel="nofollow" href="https://www.rust-lang.org/" class='result-link'>Rust Programming Language</a></td></tr>
+          <tr><td></td><td class='result-snippet'>A language empowering everyone to build reliable software.</td></tr>
+          <tr><td>2.</td><td><a rel="nofollow" href="https://doc.rust-lang.org/book/">The Rust Book</a></td></tr>
+        </table>"#;
+        let r = parse_ddg_lite(html, 8);
+        assert_eq!(r.len(), 2);
+        assert_eq!(r[0].0, "Rust Programming Language");
+        assert_eq!(r[0].1, "https://www.rust-lang.org/");
+        assert!(r[0].2.contains("empowering everyone"));
+        assert_eq!(r[1].1, "https://doc.rust-lang.org/book/");
+    }
+
+    #[test]
+    fn percent_encoding() {
+        assert_eq!(percent_encode("rust async book"), "rust+async+book");
+        assert_eq!(percent_encode("a&b=c"), "a%26b%3Dc");
     }
 
     #[tokio::test]
