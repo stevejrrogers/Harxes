@@ -40,7 +40,7 @@ struct RequestFunction<'a> {
 struct ApiMessage<'a> {
     role: &'a str,
     #[serde(skip_serializing_if = "Option::is_none")]
-    content: Option<String>,
+    content: Option<serde_json::Value>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     tool_calls: Vec<RequestToolCall<'a>>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -52,19 +52,32 @@ fn to_api_message(m: &Message) -> ApiMessage<'_> {
     match m.role {
         Role::System => ApiMessage {
             role: "system",
-            content: Some(m.content.clone()),
+            content: Some(serde_json::Value::String(m.content.clone())),
             tool_calls: vec![],
             tool_call_id: None,
         },
         Role::User => ApiMessage {
             role: "user",
-            content: Some(m.content.clone()),
+            content: Some(if m.images.is_empty() {
+                serde_json::Value::String(m.content.clone())
+            } else {
+                // Multimodal: text part plus data-URI image parts.
+                let mut parts =
+                    vec![serde_json::json!({"type": "text", "text": m.content})];
+                for img in &m.images {
+                    parts.push(serde_json::json!({
+                        "type": "image_url",
+                        "image_url": {"url": format!("data:{};base64,{}", img.media_type, img.base64)}
+                    }));
+                }
+                serde_json::Value::Array(parts)
+            }),
             tool_calls: vec![],
             tool_call_id: None,
         },
         Role::Tool => ApiMessage {
             role: "tool",
-            content: Some(m.content.clone()),
+            content: Some(serde_json::Value::String(m.content.clone())),
             tool_calls: vec![],
             tool_call_id: m.tool_call_id.as_deref(),
         },
@@ -85,7 +98,7 @@ fn to_api_message(m: &Message) -> ApiMessage<'_> {
             let content = if m.content.is_empty() {
                 None
             } else {
-                Some(m.content.clone())
+                Some(serde_json::Value::String(m.content.clone()))
             };
             ApiMessage {
                 role: "assistant",
@@ -96,7 +109,7 @@ fn to_api_message(m: &Message) -> ApiMessage<'_> {
         }
         Role::Assistant => ApiMessage {
             role: "assistant",
-            content: Some(m.content.clone()),
+            content: Some(serde_json::Value::String(m.content.clone())),
             tool_calls: vec![],
             tool_call_id: None,
         },
@@ -424,6 +437,30 @@ impl LlmPort for OpenAiClient {
             usage: TokenUsage::new(prompt_tokens, completion_tokens),
             tool_calls,
         })
+    }
+}
+
+#[cfg(test)]
+mod vision_tests {
+    use super::*;
+    use harxes_core_domain::domain::value_objects::ImageData;
+
+    #[test]
+    fn user_message_with_images_becomes_multimodal_parts() {
+        let m = Message::user_with_images(
+            "what is this?",
+            vec![ImageData { media_type: "image/png".into(), base64: "QUJD".into() }],
+        );
+        let api = to_api_message(&m);
+        let v = serde_json::to_value(&api).unwrap();
+        let parts = v["content"].as_array().expect("array content");
+        assert_eq!(parts[0]["type"], "text");
+        assert_eq!(parts[1]["type"], "image_url");
+        assert_eq!(parts[1]["image_url"]["url"], "data:image/png;base64,QUJD");
+        // Plain user message keeps string content.
+        let msg = Message::new(Role::User, "hi");
+        let plain = to_api_message(&msg);
+        assert!(serde_json::to_value(&plain).unwrap()["content"].is_string());
     }
 }
 

@@ -39,4 +39,18 @@ pub trait AgentPort: Send + Sync {
         user_prompt: &str,
         limits: &LoopLimits,
     ) -> Result<ConversationResult, LlmError>;
+
+    /// Like [`Self::continue_chat`] but takes a full user [`Message`], so
+    /// callers can attach images (vision input). Default drops attachments.
+    async fn continue_chat_with(
+        &self,
+        provider_id: &ProviderId,
+        model_id: &str,
+        history: &[Message],
+        user: Message,
+        limits: &LoopLimits,
+    ) -> Result<ConversationResult, LlmError> {
+        self.continue_chat(provider_id, model_id, history, &user.content, limits)
+            .await
+    }
 }

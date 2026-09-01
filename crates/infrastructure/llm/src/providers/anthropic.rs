@@ -85,6 +85,22 @@ fn encode_messages(messages: &[Message]) -> serde_json::Value {
                     "tool_use_id": m.tool_call_id.clone().unwrap_or_default(),
                     "content": m.content,
                 }]),
+                Role::User if !m.images.is_empty() => {
+                    let mut blocks: Vec<serde_json::Value> = m
+                        .images
+                        .iter()
+                        .map(|img| serde_json::json!({
+                            "type": "image",
+                            "source": {
+                                "type": "base64",
+                                "media_type": img.media_type,
+                                "data": img.base64,
+                            }
+                        }))
+                        .collect();
+                    blocks.push(serde_json::json!({ "type": "text", "text": m.content }));
+                    serde_json::Value::Array(blocks)
+                }
                 _ => serde_json::Value::String(m.content.clone()),
             };
             serde_json::json!({ "role": role, "content": content })
@@ -452,6 +468,21 @@ mod tests {
                 "required": ["command"]
             }),
         )]
+    }
+
+    #[test]
+    fn user_images_become_image_blocks() {
+        use harxes_core_domain::domain::value_objects::ImageData;
+        let m = Message::user_with_images(
+            "describe",
+            vec![ImageData { media_type: "image/jpeg".into(), base64: "QUJD".into() }],
+        );
+        let enc = encode_messages(&[m]);
+        let blocks = enc[0]["content"].as_array().unwrap();
+        assert_eq!(blocks[0]["type"], "image");
+        assert_eq!(blocks[0]["source"]["media_type"], "image/jpeg");
+        assert_eq!(blocks[0]["source"]["data"], "QUJD");
+        assert_eq!(blocks[1]["type"], "text");
     }
 
     #[test]

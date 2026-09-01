@@ -10,6 +10,16 @@ pub enum Role {
     Tool,
 }
 
+/// An image attached to a user message, carried as base64 for the provider
+/// adapters to encode into their multimodal wire formats.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ImageData {
+    /// MIME type, e.g. `image/png`.
+    pub media_type: String,
+    /// Base64-encoded bytes (no data-URI prefix).
+    pub base64: String,
+}
+
 /// A chat message that may carry an assistant's requested [`ToolCall`]s or a
 /// [`Role::Tool`] result referencing a specific call id.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -20,6 +30,9 @@ pub struct Message {
     pub tool_calls: Vec<ToolCall>,
     /// Populated for [`Role::Tool`] messages linking back to a call id.
     pub tool_call_id: Option<String>,
+    /// Images attached to a [`Role::User`] message (vision input).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub images: Vec<ImageData>,
 }
 
 impl Message {
@@ -29,6 +42,18 @@ impl Message {
             content: content.into(),
             tool_calls: vec![],
             tool_call_id: None,
+            images: vec![],
+        }
+    }
+
+    /// Build a user message with attached images (vision input).
+    pub fn user_with_images(content: impl Into<String>, images: Vec<ImageData>) -> Self {
+        Self {
+            role: Role::User,
+            content: content.into(),
+            tool_calls: vec![],
+            tool_call_id: None,
+            images,
         }
     }
 
@@ -39,6 +64,7 @@ impl Message {
             content: String::new(),
             tool_calls,
             tool_call_id: None,
+            images: vec![],
         }
     }
 
@@ -49,6 +75,7 @@ impl Message {
             content: output.into(),
             tool_calls: vec![],
             tool_call_id: Some(call_id.into()),
+            images: vec![],
         }
     }
 }

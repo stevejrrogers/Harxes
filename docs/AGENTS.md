@@ -86,6 +86,18 @@ turn đang chạy trong TUI.
   chặn tool call (output thành lý do cho model thấy); post_tool stdout được nối
   vào tool result làm feedback. `match` hỗ trợ wildcard `*`.
 
+## Web tools, failover, caching, vision
+
+- `Search` (DDG lite, key-free) + `Fetch` — adapter `crates/infrastructure/web`
+  (`WebPort`), cả hai read-only nên chạy song song.
+- `fallback_models` trong config: thứ tự model dự phòng khi model chính lỗi
+  terminal (không failover lỗi Auth); observer hiện dòng `Failover`.
+- Anthropic adapter gắn `cache_control: ephemeral` vào system block + tool cuối
+  → prompt caching cho prefix ổn định.
+- Vision: `Message.images` (`ImageData{media_type, base64}`); CLI tự attach khi
+  prompt nhắc tới file ảnh tồn tại (`attach_images` trong main.rs, cap 5MB);
+  OpenAI = data-URI parts, Anthropic = image blocks.
+
 ## Fetch tool
 
 Tool `Fetch` (adapter `crates/infrastructure/web`, port `WebPort`): HTTP GET,

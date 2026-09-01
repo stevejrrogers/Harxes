@@ -1075,6 +1075,25 @@ impl crate::ports::AgentPort for AgentLoop {
             transcript: final_transcript,
         })
     }
+
+    async fn continue_chat_with(
+        &self,
+        provider_id: &ProviderId,
+        model_id: &str,
+        history: &[Message],
+        user: Message,
+        limits: &LoopLimits,
+    ) -> Result<crate::ports::ConversationResult, LlmError> {
+        let mut transcript = history.to_vec();
+        transcript.push(user);
+        let (outcome, final_transcript) = self
+            .run_loop(provider_id, model_id, transcript, limits)
+            .await?;
+        Ok(crate::ports::ConversationResult {
+            outcome,
+            transcript: final_transcript,
+        })
+    }
 }
 
 #[cfg(test)]

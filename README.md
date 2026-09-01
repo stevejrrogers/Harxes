@@ -16,7 +16,9 @@ harxes
 - **Self-managed plan** — the agent tracks multi-step work with a Todo tool (atomic whole-list writes, one step in-progress at a time), rendered live in the TUI with a spinner; stale plans trigger a reminder. `/plan`, `/todo`.
 - **Workspace memory** — `HARXES.md` (or `AGENTS.md`/`CLAUDE.md`) at the repo root and `~/.harxes/HARXES.md` globally are folded into the system prompt; `/init` asks the agent to write one. Shared notes live in `.harxes/agents/NOTES.md`.
 - **Sub-agents** — a `Delegate` tool spawns scoped sub-agents whose tool activity nests in the UI (`└ Bash`).
-- **Web fetch** — a built-in `Fetch` tool reads pages and APIs (HTML reduced to text, size-capped).
+- **Web search & fetch** — built-in `Search` (key-free, DuckDuckGo) and `Fetch` (HTML reduced to text, size-capped) tools.
+- **Vision input** — mention an image file path in your prompt and it is attached to the message (Anthropic image blocks / OpenAI data-URI parts; needs a vision-capable model).
+- **Failover & caching** — config `fallback_models` switch models on terminal errors; Anthropic requests carry prompt-cache breakpoints on system + tools.
 - **MCP client** — stdio MCP servers from config appear as `mcp__server__tool`; `/mcp` shows status.
 - **Hooks** — shell commands around tool calls: `pre_tool` can veto (exit 2), `post_tool` feeds output back to the model.
 - **Permissions** — dangerous commands prompt y/n in the TUI; config `commands.allow`/`deny` skip or hard-block by pattern; file edits show a colored diff before applying.

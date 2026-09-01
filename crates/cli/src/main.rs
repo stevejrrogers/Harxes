@@ -122,12 +122,18 @@ fn run_one_shot(wiring: &compose::Wiring, cli: &Cli, prompt: &str) {
     match tokio::runtime::Runtime::new() {
         Ok(rt) => rt.block_on(async {
             wiring.streamed.store(false, std::sync::atomic::Ordering::Relaxed);
+            let history = vec![Message::new(Role::System, system.clone())];
+            let user = harxes_core_domain::domain::value_objects::Message::user_with_images(
+                prompt.to_string(),
+                attach_images(prompt),
+            );
             match wiring
                 .agent
-                .run(&pid, &model, &system, prompt, &wiring.limits)
+                .continue_chat_with(&pid, &model, &history, user, &wiring.limits)
                 .await
             {
-                Ok(out) => {
+                Ok(res) => {
+                    let out = res.outcome;
                     // If the live stream already printed the text, don't re-print it.
                     if !wiring.streamed.load(std::sync::atomic::Ordering::Relaxed) {
                         println!("{}", ui::render_assistant(&out.final_text));
@@ -155,6 +161,49 @@ fn run_one_shot(wiring: &compose::Wiring, cli: &Cli, prompt: &str) {
             std::process::exit(1);
         }
     }
+}
+
+/// Base64 (standard alphabet, padded) — tiny local encoder to avoid a dep.
+fn base64_encode(data: &[u8]) -> String {
+    const AB: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = String::with_capacity(data.len().div_ceil(3) * 4);
+    for chunk in data.chunks(3) {
+        let b = [chunk[0], *chunk.get(1).unwrap_or(&0), *chunk.get(2).unwrap_or(&0)];
+        let n = u32::from(b[0]) << 16 | u32::from(b[1]) << 8 | u32::from(b[2]);
+        out.push(AB[(n >> 18) as usize & 63] as char);
+        out.push(AB[(n >> 12) as usize & 63] as char);
+        out.push(if chunk.len() > 1 { AB[(n >> 6) as usize & 63] as char } else { '=' });
+        out.push(if chunk.len() > 2 { AB[n as usize & 63] as char } else { '=' });
+    }
+    out
+}
+
+/// Scan a prompt for existing image-file paths and load them as attachments
+/// (vision input). The prompt text is left untouched.
+fn attach_images(prompt: &str) -> Vec<harxes_core_domain::domain::value_objects::ImageData> {
+    const MAX_IMAGE_BYTES: u64 = 5_000_000;
+    let mut out = Vec::new();
+    for token in prompt.split_whitespace() {
+        let path = token.trim_matches(['\'', '"', ',', ';']);
+        let mime = match path.rsplit('.').next().map(|e| e.to_lowercase()).as_deref() {
+            Some("png") => "image/png",
+            Some("jpg") | Some("jpeg") => "image/jpeg",
+            Some("gif") => "image/gif",
+            Some("webp") => "image/webp",
+            _ => continue,
+        };
+        let Ok(meta) = std::fs::metadata(path) else { continue };
+        if !meta.is_file() || meta.len() > MAX_IMAGE_BYTES {
+            continue;
+        }
+        if let Ok(bytes) = std::fs::read(path) {
+            out.push(harxes_core_domain::domain::value_objects::ImageData {
+                media_type: mime.to_string(),
+                base64: base64_encode(&bytes),
+            });
+        }
+    }
+    out
 }
 
 /// The base system prompt: identity, environment, and working discipline.
@@ -926,8 +975,13 @@ async fn run_turn_owned(
     if !has_system {
         messages.insert(0, Message::new(Role::System, system));
     }
+    let images = attach_images(&user_msg);
+    let user = harxes_core_domain::domain::value_objects::Message::user_with_images(
+        user_msg.clone(),
+        images,
+    );
     match agent
-        .continue_chat(&pid, &model, &messages, &user_msg, &limits)
+        .continue_chat_with(&pid, &model, &messages, user, &limits)
         .await
     {
         Ok(res) => {
@@ -1094,6 +1148,28 @@ fn estimate_cost(model: &str, in_tok: u64, out_tok: u64) -> f64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn base64_encodes_rfc_vectors() {
+        assert_eq!(base64_encode(b""), "");
+        assert_eq!(base64_encode(b"f"), "Zg==");
+        assert_eq!(base64_encode(b"fo"), "Zm8=");
+        assert_eq!(base64_encode(b"foo"), "Zm9v");
+        assert_eq!(base64_encode(b"foobar"), "Zm9vYmFy");
+    }
+
+    #[test]
+    fn attach_images_finds_existing_files_only() {
+        let dir = std::env::temp_dir().join(format!("hx-img-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let img = dir.join("shot.png");
+        std::fs::write(&img, [0x89u8, 0x50, 0x4E, 0x47]).unwrap();
+        let prompt = format!("what is in {} and also missing.png?", img.display());
+        let imgs = attach_images(&prompt);
+        assert_eq!(imgs.len(), 1, "only the existing file attaches");
+        assert_eq!(imgs[0].media_type, "image/png");
+        assert_eq!(imgs[0].base64, base64_encode(&[0x89, 0x50, 0x4E, 0x47]));
+    }
 
     #[test]
     fn tool_preview_formats() {

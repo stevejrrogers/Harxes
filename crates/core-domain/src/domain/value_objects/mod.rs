@@ -11,7 +11,7 @@ pub use context_window::{
     compress_transcript_to_budget, estimate_tokens, message_tokens, transcript_tokens,
     trim_to_budget,
 };
-pub use message::{Message, Role};
+pub use message::{ImageData, Message, Role};
 pub use model_id::{InvalidModelId, ModelId};
 pub use permission::{CommandPolicy, CommandVerdict, FsOp, PermissionPolicy};
 pub use provider_id::{InvalidProviderId, ProviderId};
