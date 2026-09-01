@@ -16,6 +16,7 @@ pub enum ToolId {
     Glob,
     Delegate,
     Todo,
+    Fetch,
 }
 
 impl ToolId {
@@ -29,6 +30,7 @@ impl ToolId {
             ToolId::Glob => "Glob",
             ToolId::Delegate => "Delegate",
             ToolId::Todo => "Todo",
+            ToolId::Fetch => "Fetch",
         }
     }
     pub fn parse(name: &str) -> Option<ToolId> {
@@ -41,6 +43,7 @@ impl ToolId {
             "Glob" | "glob" => Some(ToolId::Glob),
             "Delegate" | "delegate" => Some(ToolId::Delegate),
             "Todo" | "todo" => Some(ToolId::Todo),
+            "Fetch" | "fetch" | "WebFetch" | "webfetch" => Some(ToolId::Fetch),
             _ => None,
         }
     }
@@ -57,6 +60,7 @@ pub enum ParsedArgs {
     Glob { pattern: String, max_depth: Option<usize> },
     Delegate { task: String, context: Option<String> },
     Todo { action: TodoAction, items: Vec<TodoItem> },
+    Fetch { url: String },
 }
 
 /// The full set of tool specifications offered to the model.
@@ -162,6 +166,11 @@ pub fn all_tool_specs() -> Vec<ToolSpec> {
                 })
             },
         ),
+        ToolSpec::with_schema(
+            "Fetch",
+            "Fetch a web page or API over HTTP GET and return its readable text (HTML is reduced to text, output is capped). Use for documentation, references and public APIs.",
+            obj_schema(vec![("url", "string")]),
+        ),
     ]
 }
 
@@ -254,6 +263,12 @@ pub fn parse_args(tool: ToolId, raw: &str) -> ParsedArgs {
                         context: context.map(|s| s.to_string()),
                     };
                 }
+                ToolId::Fetch => {
+                    let url = obj.get("url").and_then(|x| x.as_str()).unwrap_or(raw);
+                    return ParsedArgs::Fetch {
+                        url: url.to_string(),
+                    };
+                }
                 ToolId::Todo => {
                     let action = obj
                         .get("action")
@@ -330,6 +345,9 @@ pub fn parse_args(tool: ToolId, raw: &str) -> ParsedArgs {
         ToolId::Delegate => ParsedArgs::Delegate {
             task: raw.trim().to_string(),
             context: None,
+        },
+        ToolId::Fetch => ParsedArgs::Fetch {
+            url: raw.trim().to_string(),
         },
         ToolId::Todo => ParsedArgs::Todo {
             action: TodoAction::List,

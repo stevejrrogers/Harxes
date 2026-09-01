@@ -238,7 +238,8 @@ pub fn assemble(
     .with_observer(Arc::new(observer))
     .with_todos(todos.clone())
     .with_command_policy(cfg.commands)
-    .with_hooks(cfg.hooks);
+    .with_hooks(cfg.hooks)
+    .with_web(Arc::new(harxes_infra_web::ReqwestWeb::default()));
     let mcp_tools: Vec<String> = mcp_hub
         .as_ref()
         .map(|h| {

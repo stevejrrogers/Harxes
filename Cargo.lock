@@ -509,6 +509,7 @@ dependencies = [
  "harxes-infra-mcp",
  "harxes-infra-session",
  "harxes-infra-shell",
+ "harxes-infra-web",
  "ratatui",
  "syntect",
  "tokio",
@@ -583,6 +584,16 @@ dependencies = [
  "async-trait",
  "harxes-core-domain",
  "libc",
+ "tokio",
+]
+
+[[package]]
+name = "harxes-infra-web"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "harxes-core-domain",
+ "reqwest",
  "tokio",
 ]
 

@@ -59,6 +59,8 @@ pub struct AgentLoop {
     dynamic_tools: Option<Arc<dyn harxes_core_domain::ports::DynamicToolPort>>,
     /// User-configured lifecycle hooks run around tool execution.
     hooks: harxes_core_domain::ports::HooksConfig,
+    /// Web fetcher backing the `Fetch` tool (optional).
+    web: Option<Arc<dyn harxes_core_domain::ports::WebPort>>,
 }
 
 impl AgentLoop {
@@ -81,7 +83,14 @@ impl AgentLoop {
             command_policy: Default::default(),
             dynamic_tools: None,
             hooks: Default::default(),
+            web: None,
         }
+    }
+
+    /// Attach a web fetcher enabling the `Fetch` tool.
+    pub fn with_web(mut self, w: Arc<dyn harxes_core_domain::ports::WebPort>) -> Self {
+        self.web = Some(w);
+        self
     }
 
     /// Attach user-configured lifecycle hooks.
@@ -213,6 +222,13 @@ impl AgentLoop {
                         .await
                 }
                 ParsedArgs::Todo { action, items } => self.handle_todo(action, items),
+                ParsedArgs::Fetch { url } => match &self.web {
+                    Some(w) => match w.fetch(&url).await {
+                        Ok(text) => text,
+                        Err(e) => format!("fetch error: {e}"),
+                    },
+                    None => "fetch error: web access is not available".to_string(),
+                },
             },
             None => match &self.dynamic_tools {
                 Some(d) if d.owns(call.name.as_str()) => {
@@ -234,7 +250,7 @@ impl AgentLoop {
         use harxes_core_domain::domain::services::tool_protocol::ToolId;
         matches!(
             ToolId::parse(name),
-            Some(ToolId::Read | ToolId::Grep | ToolId::Glob)
+            Some(ToolId::Read | ToolId::Grep | ToolId::Glob | ToolId::Fetch)
         )
     }
 
@@ -661,6 +677,7 @@ impl AgentLoop {
             command_policy: self.command_policy.clone(),
             dynamic_tools: self.dynamic_tools.clone(),
             hooks: self.hooks.clone(),
+            web: self.web.clone(),
         };
         let limits = LoopLimits {
             max_iterations: 15,

@@ -1,0 +1,12 @@
+[package]
+name = "harxes-infra-web"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+harxes-core-domain = { path = "../../core-domain" }
+async-trait = { workspace = true }
+reqwest = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true }

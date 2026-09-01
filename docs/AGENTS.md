@@ -87,6 +87,12 @@ turn đang chạy trong TUI.
   chặn tool call (output thành lý do cho model thấy); post_tool stdout được nối
   vào tool result làm feedback. `match` hỗ trợ wildcard `*`.
 
+## Fetch tool
+
+Tool `Fetch` (adapter `crates/infrastructure/web`, port `WebPort`): HTTP GET,
+HTML→text (bỏ script/style, decode entity, gộp whitespace), cap 20k chars,
+chỉ nhận http(s). Read-only nên được chạy song song cùng Read/Grep/Glob.
+
 ## System prompt
 
 `build_system_prompt()` trong `crates/cli/src/main.rs`: identity + môi trường
