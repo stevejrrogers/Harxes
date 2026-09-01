@@ -56,7 +56,6 @@ turn đang chạy trong TUI.
   `content_block_stop(tool_use)` / `message_delta`.
 - OpenAI: SSE `choices[0].delta.content` + `delta.tool_calls[]` (BTreeMap theo index), `include_usage`.
 - CLI: one-shot bật streaming — text in gõ dần; TUI nhận final text.
-- Chú ý: Anthropic adapter chưa pass `tools` lên API (giới hạn có sẵn từ trước).
 
 ### Ctrl-C cancel (TUI)
 - `tui::run` nhận thêm callback `cancel_turn`; khi `state.processing` và bấm Ctrl-C →
