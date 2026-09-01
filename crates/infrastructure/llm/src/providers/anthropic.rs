@@ -9,7 +9,7 @@ use serde::Serialize;
 struct RequestBody<'a> {
     model: &'a str,
     max_tokens: u32,
-    system: Option<&'a str>,
+    system: Option<serde_json::Value>,
     messages: serde_json::Value,
     temperature: Option<f64>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
@@ -93,12 +93,16 @@ fn encode_messages(messages: &[Message]) -> serde_json::Value {
     serde_json::Value::Array(arr)
 }
 
-/// Encode tool declarations into the Anthropic `tools` payload.
+/// Encode tool declarations into the Anthropic `tools` payload. The last tool
+/// carries a `cache_control` breakpoint so the (stable) tool definitions are
+/// prompt-cached across turns.
 fn encode_tools(tools: &[ToolSpec]) -> Vec<serde_json::Value> {
+    let n = tools.len();
     tools
         .iter()
-        .map(|t| {
-            serde_json::json!({
+        .enumerate()
+        .map(|(i, t)| {
+            let mut v = serde_json::json!({
                 "name": t.id,
                 "description": t.description,
                 "input_schema": if t.input_schema.is_null() {
@@ -106,9 +110,28 @@ fn encode_tools(tools: &[ToolSpec]) -> Vec<serde_json::Value> {
                 } else {
                     t.input_schema.clone()
                 },
-            })
+            });
+            if i + 1 == n {
+                v["cache_control"] = serde_json::json!({"type": "ephemeral"});
+            }
+            v
         })
         .collect()
+}
+
+/// Encode the system prompt as a cache-marked content block so it is
+/// prompt-cached across turns (it only changes when workspace context does).
+fn encode_system(messages: &[Message]) -> Option<serde_json::Value> {
+    messages
+        .iter()
+        .find(|m| m.role == Role::System)
+        .map(|m| {
+            serde_json::json!([{
+                "type": "text",
+                "text": m.content,
+                "cache_control": {"type": "ephemeral"}
+            }])
+        })
 }
 
 /// Anthropic Messages API driven adapter.
@@ -144,14 +167,10 @@ impl LlmPort for AnthropicClient {
         tools: &[ToolSpec],
         temperature: Option<f64>,
     ) -> Result<AgentResponse, LlmError> {
-        let system = messages
-            .iter()
-            .find(|m| m.role == Role::System)
-            .map(|m| m.content.as_str());
         let body = RequestBody {
             model: model_id,
             max_tokens: DEFAULT_MAX_TOKENS,
-            system,
+            system: encode_system(messages),
             messages: encode_messages(messages),
             temperature,
             tools: encode_tools(tools),
@@ -241,16 +260,11 @@ impl LlmPort for AnthropicClient {
         use futures_util::StreamExt;
         use harxes_core_domain::ports::StreamEvent;
 
-        let system = messages
-            .iter()
-            .find(|m| m.role == Role::System)
-            .map(|m| m.content.as_str());
-
         let body = serde_json::json!({
             "model": model_id,
             "max_tokens": DEFAULT_MAX_TOKENS,
             "stream": true,
-            "system": system,
+            "system": encode_system(messages),
             "messages": encode_messages(messages),
             "tools": encode_tools(tools),
             "temperature": temperature,
@@ -438,6 +452,24 @@ mod tests {
                 "required": ["command"]
             }),
         )]
+    }
+
+    #[test]
+    fn cache_breakpoints_on_last_tool_and_system() {
+        let tools = vec![
+            ToolSpec::new("A", "a"),
+            ToolSpec::new("B", "b"),
+        ];
+        let enc = encode_tools(&tools);
+        assert!(enc[0].get("cache_control").is_none());
+        assert_eq!(enc[1]["cache_control"]["type"], "ephemeral");
+
+        let msgs = vec![Message::new(Role::System, "sys prompt")];
+        let sys = encode_system(&msgs).unwrap();
+        assert_eq!(sys[0]["type"], "text");
+        assert_eq!(sys[0]["text"], "sys prompt");
+        assert_eq!(sys[0]["cache_control"]["type"], "ephemeral");
+        assert!(encode_system(&[]).is_none());
     }
 
     #[test]
