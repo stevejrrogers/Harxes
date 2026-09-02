@@ -435,42 +435,7 @@ fn agent_lines(text: &str) -> Vec<Line<'static>> {
     out
 }
 
-fn est_lines(state: &AppState, width: usize) -> usize {
-    let w = width.max(10);
-    let mut n = 0usize;
-    for l in &state.lines {
-        match l {
-            ChatLine::User(t) => {
-                n += 1 + t.split('\n').map(|l| 1 + l.len() / w).sum::<usize>()
-            }
-            ChatLine::Agent(t) => {
-                // +2 for header/trailing blank; code fences add frame lines.
-                n += 2
-                    + t.split('\n').map(|l| 1 + l.len() / w).sum::<usize>()
-                    + t.matches("```").count();
-            }
-            ChatLine::Tool(t) => {
-                n += if state.expand_tools {
-                    t.split('\n').count()
-                } else {
-                    1
-                }
-            }
-        }
-    }
-    n
-}
-
 fn chat_pane(frame: &mut Frame, state: &mut AppState, area: Rect) {
-    let total = est_lines(state, area.width as usize);
-    let bottom = (total.saturating_sub(area.height as usize)) as u16;
-    if state.auto_scroll {
-        state.scroll = bottom;
-    } else if state.scroll >= bottom {
-        // Scrolled back to (or past) the bottom: resume following the tail.
-        state.scroll = bottom;
-        state.auto_scroll = true;
-    }
     let mut text = ratatui::text::Text::default();
     for line in &state.lines {
         match line {
@@ -555,6 +520,23 @@ fn chat_pane(frame: &mut Frame, state: &mut AppState, area: Rect) {
         ]));
     }
 
+    // Auto-scroll against the ACTUAL rendered text: measure each line's
+    // display width (not bytes — multibyte text made the old estimate
+    // overshoot and scroll the whole conversation off screen).
+    let w = (area.width as usize).max(1);
+    let total: usize = text
+        .lines
+        .iter()
+        .map(|l| 1 + l.width().saturating_sub(1) / w)
+        .sum();
+    let bottom = (total.saturating_sub(area.height as usize)) as u16;
+    if state.auto_scroll {
+        state.scroll = bottom;
+    } else if state.scroll >= bottom {
+        // Scrolled back to (or past) the bottom: resume following the tail.
+        state.scroll = bottom;
+        state.auto_scroll = true;
+    }
     let para = Paragraph::new(text)
         .style(Style::default())
         .wrap(ratatui::widgets::Wrap { trim: false })
@@ -1373,6 +1355,33 @@ mod tests {
             apply_edit_key(&mut st, KeyCode::Right);
         }
         assert_eq!(st.cursor_ix, st.input.len());
+    }
+
+    #[test]
+    fn auto_scroll_keeps_tail_visible_with_multibyte_text() {
+        let mut st = AppState::new("p", "m");
+        // Lots of Vietnamese content: bytes ≈ 2-3x display width, which used
+        // to make the scroll estimate overshoot and blank the whole pane.
+        for i in 0..30 {
+            st.lines.push(ChatLine::Agent(format!(
+                "câu trả lời số {i}: hệ thống hỗ trợ tiếng Việt đầy đủ, không được cuộn mất nội dung nào cả"
+            )));
+        }
+        st.lines.push(ChatLine::Agent("DAU-CUOI-PHAI-THAY".into()));
+        let backend = TestBackend::new(100, 20);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|f| draw(f, &mut st)).unwrap();
+        let buf = terminal.backend().buffer();
+        let mut screen = String::new();
+        for y in 0..buf.area.height {
+            for x in 0..buf.area.width {
+                screen.push_str(buf[(x, y)].symbol());
+            }
+        }
+        assert!(
+            screen.contains("DAU-CUOI-PHAI-THAY"),
+            "last message must be visible, screen was:\n{screen}"
+        );
     }
 
     #[test]
