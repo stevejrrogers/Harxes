@@ -894,6 +894,60 @@ pub fn draw(frame: &mut Frame, state: &mut AppState) {
     );
 }
 
+/// Pure text-editing keys (insert, backspace, cursor moves), extracted from
+/// the event loop so multibyte handling is unit-testable. Returns true when
+/// the key was consumed.
+pub fn apply_edit_key(state: &mut AppState, code: KeyCode) -> bool {
+    match code {
+        KeyCode::Char(c) => {
+            let ix = state.cursor_ix.min(state.input.len());
+            if state.input.is_char_boundary(ix) {
+                state.input.insert(ix, c);
+                state.cursor_ix = ix + c.len_utf8();
+                update_completions(state);
+            }
+            true
+        }
+        KeyCode::Backspace => {
+            let cur = state.cursor_ix.min(state.input.len());
+            if cur > 0 && !state.input.is_empty() {
+                let sidx = state.input.floor_char_boundary(cur - 1);
+                if sidx < cur {
+                    state.input.replace_range(sidx..cur, "");
+                    state.cursor_ix = sidx;
+                }
+                update_completions(state);
+            }
+            true
+        }
+        KeyCode::Left => {
+            if !state.completions.is_empty() || state.hist_pos.is_some() {
+                return false;
+            }
+            let cur = state.cursor_ix.min(state.input.len());
+            if cur > 0 && !state.input.is_empty() {
+                state.cursor_ix = state.input.floor_char_boundary(cur - 1);
+            }
+            true
+        }
+        KeyCode::Right => {
+            if !state.completions.is_empty() || state.hist_pos.is_some() {
+                return false;
+            }
+            let raw = state.cursor_ix.min(state.input.len());
+            // Floor onto a boundary so the slice below never panics.
+            let cur = state.input.floor_char_boundary(raw);
+            if cur < state.input.len() {
+                if let Some(ch) = state.input[cur..].chars().next() {
+                    state.cursor_ix = cur + ch.len_utf8();
+                }
+            }
+            true
+        }
+        _ => false,
+    }
+}
+
 pub fn run(
     state: &mut AppState,
     mut on_command: impl FnMut(&mut AppState, String),
@@ -979,49 +1033,10 @@ pub fn run(
                     }
                     continue;
                 }
+                if apply_edit_key(state, k.code) {
+                    continue;
+                }
                 match k.code {
-                    KeyCode::Char(c) => {
-                        let ix = state.cursor_ix.min(state.input.len());
-                        if !state.input.is_char_boundary(ix) {
-                            continue;
-                        }
-                        state.input.insert(ix, c);
-                        state.cursor_ix = ix + c.len_utf8();
-                        update_completions(state);
-                    }
-                    KeyCode::Backspace => {
-                        let cur = state.cursor_ix.min(state.input.len());
-                        if cur > 0 && !state.input.is_empty() {
-                            let sidx = state.input.floor_char_boundary(cur - 1);
-                            if sidx < cur {
-                                state.input.replace_range(sidx..cur, "");
-                                state.cursor_ix = sidx;
-                            }
-                            update_completions(state);
-                        }
-                    }
-                    KeyCode::Left => {
-                        if !state.completions.is_empty() || state.hist_pos.is_some() {
-                            continue;
-                        }
-                        let cur = state.cursor_ix.min(state.input.len());
-                        if cur > 0 && !state.input.is_empty() {
-                            state.cursor_ix = state.input.floor_char_boundary(cur - 1);
-                        }
-                    }
-                    KeyCode::Right => {
-                        if !state.completions.is_empty() || state.hist_pos.is_some() {
-                            continue;
-                        }
-                        let raw = state.cursor_ix.min(state.input.len());
-                        // Floor onto a boundary so the slice below never panics.
-                        let cur = state.input.floor_char_boundary(raw);
-                        if cur < state.input.len() {
-                            if let Some(ch) = state.input[cur..].chars().next() {
-                                state.cursor_ix = cur + ch.len_utf8();
-                            }
-                        }
-                    }
 
                     KeyCode::Enter => {
                         if !state.completions.is_empty() {
@@ -1207,11 +1222,12 @@ fn code_block_lines(lang: &str, code: &str) -> Vec<Line<'static>> {
     out
 }
 
-pub const SLASH_COMMANDS: [&str; 16] = [
+pub const SLASH_COMMANDS: [&str; 17] = [
     "/help",
     "/clear",
     "/cost",
     "/model ",
+    "/models",
     "/compact",
     "/undo",
     "/sessions",
@@ -1327,6 +1343,36 @@ mod tests {
             all.contains("hello\u{258b}"),
             "cursor not positioned after 'hello': {all}"
         );
+    }
+
+    #[test]
+    fn edit_keys_handle_vietnamese_input() {
+        let mut st = AppState::new("p", "m");
+        for ch in "bạn làm đc gì".chars() {
+            apply_edit_key(&mut st, KeyCode::Char(ch));
+        }
+        assert_eq!(st.input, "bạn làm đc gì");
+        assert_eq!(st.cursor_ix, st.input.len());
+        // Move left through multibyte chars, insert in the middle.
+        for _ in 0..3 {
+            apply_edit_key(&mut st, KeyCode::Left);
+        }
+        apply_edit_key(&mut st, KeyCode::Char('X'));
+        assert!(st.input.contains('X'));
+        // Backspace across every char never panics and empties cleanly.
+        st.cursor_ix = st.input.len();
+        for _ in 0..64 {
+            apply_edit_key(&mut st, KeyCode::Backspace);
+        }
+        assert_eq!(st.input, "");
+        assert_eq!(st.cursor_ix, 0);
+        // Right at end is a no-op; Right through multibyte works.
+        st.input = "đợi".to_string();
+        st.cursor_ix = 0;
+        for _ in 0..5 {
+            apply_edit_key(&mut st, KeyCode::Right);
+        }
+        assert_eq!(st.cursor_ix, st.input.len());
     }
 
     #[test]

@@ -214,6 +214,40 @@ impl OpenAiClient {
 
 #[async_trait]
 impl LlmPort for OpenAiClient {
+    async fn list_models(&self) -> Result<Vec<String>, LlmError> {
+        // Derive the /models endpoint from the chat completions URL.
+        let url = self
+            .base_url
+            .trim_end_matches("/chat/completions")
+            .trim_end_matches('/')
+            .to_string()
+            + "/models";
+        let resp = self
+            .http
+            .get(&url)
+            .bearer_auth(&self.api_key)
+            .send()
+            .await
+            .map_err(|e| LlmError::Request(format!("transport error : {e}")))?;
+        if !resp.status().is_success() {
+            return Err(LlmError::Request(format!("HTTP {}", resp.status())));
+        }
+        let v: serde_json::Value = resp
+            .json()
+            .await
+            .map_err(|e| LlmError::Request(format!("decode error : {e}")))?;
+        Ok(v
+            .get("data")
+            .and_then(|d| d.as_array())
+            .map(|a| {
+                a.iter()
+                    .filter_map(|m| m.get("id").and_then(|x| x.as_str()))
+                    .map(|s| s.to_string())
+                    .collect()
+            })
+            .unwrap_or_default())
+    }
+
     async fn generate(
         &self,
         provider: &ProviderId,

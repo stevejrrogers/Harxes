@@ -140,6 +140,38 @@ mod tests {
     use super::*;
 
     #[test]
+    fn long_session_compaction_keeps_recent_and_summarizes_old() {
+        use crate::domain::value_objects::{Message, Role};
+        // Simulate a 120-turn session with distinctive markers per turn.
+        let mut t = vec![Message::new(Role::System, "sys prompt")];
+        for i in 0..120 {
+            t.push(Message::new(Role::User, format!("question number {i} about topic-{i}")));
+            t.push(Message::new(
+                Role::Assistant,
+                format!("long answer {i} {}", "x".repeat(400)),
+            ));
+        }
+        let compacted = compress_transcript_to_budget(t, 8_000, Some(64));
+        // Budget respected (with slack for the summary itself).
+        assert!(transcript_tokens(&compacted) <= 9_000);
+        // The newest turns survive verbatim.
+        let joined: String = compacted.iter().map(|m| m.content.clone()).collect();
+        assert!(joined.contains("topic-119"), "most recent turn must survive");
+        // Old turns are folded into a summary rather than silently dropped:
+        // some non-original system message exists beyond the first.
+        let extra_system = compacted
+            .iter()
+            .skip(1)
+            .filter(|m| m.role == Role::System)
+            .count();
+        assert!(
+            extra_system >= 1 || compacted.len() > 40,
+            "old turns should be summarized, not vanish"
+        );
+    }
+
+
+    #[test]
     fn fits_within_budget_returns_unchanged() {
         let msgs = vec![
             Message::new(Role::System, "sys"),

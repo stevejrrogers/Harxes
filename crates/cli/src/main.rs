@@ -163,6 +163,41 @@ fn run_one_shot(wiring: &compose::Wiring, cli: &Cli, prompt: &str) {
     }
 }
 
+/// Resolve --resume, mapping the special id "last" to the newest session.
+fn resolve_resume_id(cli: &Cli) -> Option<String> {
+    let id = cli.resume.as_ref()?;
+    if id == "last" {
+        JsonSessionStore::new(compose::default_config_dir())
+            .list()
+            .into_iter()
+            .next()
+    } else {
+        Some(id.clone())
+    }
+}
+
+/// Derive a short human slug from the first message, e.g.
+/// "fix login bug in auth" -> "fix-login-bug-in".
+fn session_slug(msg: &str) -> String {
+    let words: Vec<String> = msg
+        .split_whitespace()
+        .take(4)
+        .map(|w| {
+            w.chars()
+                .filter(|c| c.is_alphanumeric())
+                .collect::<String>()
+                .to_lowercase()
+        })
+        .filter(|w| !w.is_empty())
+        .collect();
+    let slug: String = words.join("-").chars().take(28).collect();
+    if slug.is_empty() {
+        "sess".to_string()
+    } else {
+        slug
+    }
+}
+
 /// Base64 (standard alphabet, padded) — tiny local encoder to avoid a dep.
 fn base64_encode(data: &[u8]) -> String {
     const AB: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
@@ -270,8 +305,8 @@ fn run_repl(
 ) {
     let pid = make_pid(wiring);
     let model = resolve_model(wiring, cli);
-    let session_id = match &cli.resume {
-        Some(id) => id.clone(),
+    let session_id = match resolve_resume_id(cli) {
+        Some(id) => id,
         None => format!(
             "sess-{}",
             std::time::SystemTime::now()
@@ -379,7 +414,7 @@ fn run_repl(
             match t.as_str() {
                 "/help" => {
                     st.lines.push(tui::ChatLine::Agent(String ::from("/help      this help\n/clear     clear the screen\n/cost      total tokens used\n/model X   switch model\n/compact   summarize context\n/sessions  list saved sessions\n/remember X save a note to agent memory\n/resume I  load saved session by id\n/plan T    break task T into a checklist
-/theme D|L   switch light/dark theme\n/todo done N   tick item N on the plan\n/init      generate a HARXES.md project guide\n/mcp       list connected MCP servers and tools\n/export F  write transcript to file F.md\n/cost      tokens + estimated cost\n/exit      quit")));
+/theme D|L   switch light/dark theme\n/models    list models on this provider\n/todo done N   tick item N on the plan\n/init      generate a HARXES.md project guide\n/mcp       list connected MCP servers and tools\n/export F  write transcript to file F.md\n/cost      tokens + estimated cost\n/exit      quit")));
                     return;
                 }
                 "/cost" => {
@@ -421,6 +456,25 @@ fn run_repl(
                     }
                     return;
                 }
+                "/models" => {
+                    match rt.block_on(wiring.llm.list_models()) {
+                        Ok(ms) if !ms.is_empty() => {
+                            for m in ms.iter().take(30) {
+                                st.lines.push(tui::ChatLine::Tool(format!("· {m}")));
+                            }
+                            st.lines.push(tui::ChatLine::Tool(
+                                "switch with /model <id>".into(),
+                            ));
+                        }
+                        Ok(_) => st.lines.push(tui::ChatLine::Tool(
+                            "provider does not expose a model list".into(),
+                        )),
+                        Err(e) => st
+                            .lines
+                            .push(tui::ChatLine::Agent(format!("models error: {e}"))),
+                    }
+                    return;
+                }
                 "/sessions" => {
                     let store = JsonSessionStore::new(config_dir.clone());
                     let ids = store.list();
@@ -429,11 +483,28 @@ fn run_repl(
                             .push(tui::ChatLine::Agent(String::from("no saved sessions")));
                         return;
                     }
-                    for id in &ids {
-                        let n = store.load(id).map(|r| r.transcript.len()).unwrap_or(0);
-                        st.lines
-                            .push(tui::ChatLine::Tool(format!("{id}  ({n} msgs)")));
+                    for id in ids.iter().take(15) {
+                        let (n, first) = store
+                            .load(id)
+                            .map(|r| {
+                                let f = r
+                                    .transcript
+                                    .iter()
+                                    .find(|m| m.role == Role::User)
+                                    .map(|m| {
+                                        m.content.chars().take(48).collect::<String>()
+                                    })
+                                    .unwrap_or_default();
+                                (r.transcript.len(), f)
+                            })
+                            .unwrap_or((0, String::new()));
+                        st.lines.push(tui::ChatLine::Tool(format!(
+                            "{id}  ({n} msgs)  {first}"
+                        )));
                     }
+                    st.lines.push(tui::ChatLine::Tool(
+                        "resume with /resume <id> (or --resume last)".into(),
+                    ));
                     return;
                 }
                 _ if t.starts_with("/resume ") => {
@@ -760,6 +831,19 @@ fn run_repl(
             if t.starts_with('/') {
                 return;
             }
+            // First message of a fresh session: bake a readable slug into the
+            // session id so /sessions and --resume are human-friendly.
+            if trx.borrow().is_empty() {
+                let ts = sess_cell
+                    .borrow()
+                    .rsplit('-')
+                    .next()
+                    .unwrap_or("0")
+                    .to_string();
+                let named = format!("{}-{}", session_slug(&t), ts);
+                *sess_cell.borrow_mut() = named.clone();
+                st.lines.push(tui::ChatLine::Tool(format!("session {named}")));
+            }
             st.lines.push(tui::ChatLine::User(msg.clone()));
             st.processing = true;
             // No auto-planning here: the agent plans for itself via the Todo
@@ -859,7 +943,10 @@ fn run_repl(
                         st.live_text.clear();
                     }
                     Err(e) => {
-                        st.lines.push(tui::ChatLine::Agent(format!("error: {e}")));
+                        let sid = sess_cell.borrow().clone();
+                        st.lines.push(tui::ChatLine::Agent(format!(
+                            "error: {e}\nProgress so far is saved — retry here, or later run: harxes --resume {sid}"
+                        )));
                         st.processing = false;
                     }
                 }
@@ -919,10 +1006,10 @@ fn load_history(
     Vec<Message>,
     Vec<harxes_core_domain::domain::value_objects::TodoItem>,
 ) {
-    match &cli.resume {
+    match resolve_resume_id(cli) {
         Some(id) => {
             let store = JsonSessionStore::new(compose::default_config_dir());
-            match store.load(id) {
+            match store.load(&id) {
                 Some(rec) => (rec.transcript, rec.todos),
                 None => {
                     eprintln!("harxes: no saved session '{id}', starting fresh");

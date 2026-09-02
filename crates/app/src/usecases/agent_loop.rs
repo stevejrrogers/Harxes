@@ -261,13 +261,21 @@ impl AgentLoop {
         result
     }
 
-    /// True when a tool call has no side effects and may run concurrently
-    /// with other read-only calls from the same turn.
-    fn is_read_only(name: &str) -> bool {
+    /// True when a tool call may run concurrently with its neighbors:
+    /// read-only tools, plus Delegate — issuing several delegations in one
+    /// turn is an explicit fan-out request, so run the sub-agents in parallel.
+    fn is_parallel_safe(name: &str) -> bool {
         use harxes_core_domain::domain::services::tool_protocol::ToolId;
         matches!(
             ToolId::parse(name),
-            Some(ToolId::Read | ToolId::Grep | ToolId::Glob | ToolId::Fetch | ToolId::Search)
+            Some(
+                ToolId::Read
+                    | ToolId::Grep
+                    | ToolId::Glob
+                    | ToolId::Fetch
+                    | ToolId::Search
+                    | ToolId::Delegate
+            )
         )
     }
 
@@ -283,9 +291,9 @@ impl AgentLoop {
         let mut outputs: Vec<String> = vec![String::new(); calls.len()];
         let mut i = 0usize;
         while i < calls.len() {
-            if Self::is_read_only(calls[i].name.as_str()) {
+            if Self::is_parallel_safe(calls[i].name.as_str()) {
                 let mut j = i;
-                while j < calls.len() && Self::is_read_only(calls[j].name.as_str()) {
+                while j < calls.len() && Self::is_parallel_safe(calls[j].name.as_str()) {
                     j += 1;
                 }
                 let batch = futures_util::future::join_all(
@@ -626,8 +634,57 @@ impl AgentLoop {
                 }
                 out
             }
-            Err(e) => format!("edit error {e}"),
+            Err(e) => {
+                let mut msg = format!("edit error {e}");
+                // When old_string doesn't match, point the model at the
+                // closest-looking region so it can correct itself in one step
+                // instead of blindly re-reading and retrying.
+                if let Ok(content) = self.fsys.read(path).await {
+                    if !content.contains(old_string) {
+                        if let Some((ln, snippet)) = Self::closest_snippet(&content, old_string) {
+                            msg.push_str(&format!(
+                                "\nold_string was not found in the file. Closest match near line {ln}:\n{snippet}\nAdjust old_string to match the file exactly (whitespace and indentation matter)."
+                            ));
+                        }
+                    }
+                }
+                msg
+            }
         }
+    }
+
+    /// Locate the file region most similar to the first meaningful line of a
+    /// failed `old_string`, returning (1-based line, ±3-line snippet).
+    fn closest_snippet(content: &str, old_string: &str) -> Option<(usize, String)> {
+        let probe = old_string.lines().find(|l| !l.trim().is_empty())?.trim();
+        if probe.len() < 4 {
+            return None;
+        }
+        let bigrams = |s: &str| -> std::collections::HashSet<(char, char)> {
+            let cs: Vec<char> = s.chars().collect();
+            cs.windows(2).map(|w| (w[0], w[1])).collect()
+        };
+        let pb = bigrams(probe);
+        let lines: Vec<&str> = content.lines().collect();
+        let (mut best, mut best_score) = (None, 0.0f64);
+        for (i, line) in lines.iter().enumerate() {
+            let t = line.trim();
+            if t.is_empty() {
+                continue;
+            }
+            let lb = bigrams(t);
+            let inter = pb.intersection(&lb).count() as f64;
+            let denom = pb.len().max(lb.len()).max(1) as f64;
+            let score = inter / denom;
+            if score > best_score {
+                best_score = score;
+                best = Some(i);
+            }
+        }
+        let i = best.filter(|_| best_score >= 0.4)?;
+        let lo = i.saturating_sub(3);
+        let hi = (i + 4).min(lines.len());
+        Some((i + 1, lines[lo..hi].join("\n")))
     }
 
     /// Maximum delegation nesting depth before the `Delegate` tool refuses.
@@ -849,15 +906,24 @@ impl AgentLoop {
                 Err(e) => {
                     // Classify the error as retryable (rate limit / transient
                     // 5xx-class request failure) or terminal.
-                    let retry_after = match &e {
-                        LE::RateLimited { retry_after } => Some(*retry_after),
-                        LE::Request(_) => Some(None),
+                    // Rate limits deserve real patience: quota windows are
+                    // usually tens of seconds, so give them more attempts and
+                    // longer waits than generic transient failures.
+                    let plan = match &e {
+                        LE::RateLimited { retry_after } => Some((
+                            max_retries.max(6),
+                            (2000u64 << attempt.min(4)).min(30_000),
+                            *retry_after,
+                        )),
+                        LE::Request(_) => Some((
+                            max_retries,
+                            250u64.saturating_mul(1 << attempt.min(5)),
+                            None,
+                        )),
                         _ => None,
                     };
-                    match retry_after {
-                        Some(ra) if attempt < max_retries => {
-                            let base =
-                                250u64.saturating_mul(1 << attempt.min(5));
+                    match plan {
+                        Some((cap, base, ra)) if attempt < cap => {
                             let wait = match ra {
                                 Some(secs) => base.max(secs * 1000),
                                 None => base,
@@ -972,6 +1038,10 @@ impl AgentLoop {
                 }
                 transcript.push(Message::tool_result(call.id.clone(), output));
             }
+            // Persist after every iteration so a turn killed mid-flight (rate
+            // limit, network death, Ctrl-C) can be resumed without losing the
+            // tool work already done.
+            self.persist_session(&transcript);
         }
 
         self.persist_session(&transcript);
@@ -1203,6 +1273,17 @@ mod tests {
                 exit_status: ShellExitStatus::Success,
             })
         }
+    }
+
+    #[test]
+    fn closest_snippet_points_at_similar_region() {
+        let content = "fn main() {\n    let total_cost = compute();\n    println!(\"{total_cost}\");\n}";
+        let (ln, snip) =
+            AgentLoop::closest_snippet(content, "let total_cost = compute_all();").unwrap();
+        assert_eq!(ln, 2);
+        assert!(snip.contains("compute()"));
+        // Nothing remotely similar -> no noisy suggestion.
+        assert!(AgentLoop::closest_snippet(content, "zzzz qqqq wwww eeee").is_none());
     }
 
     #[tokio::test]

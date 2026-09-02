@@ -162,6 +162,8 @@ pub fn default_provider_id() -> String {
 /// Result of assembly: a wired agent (as an abstraction) plus provider info.
 pub struct Wiring {
     pub agent: Arc<dyn AgentPort>,
+    /// Raw LLM adapter, for provider-level queries like listing models.
+    pub llm: Arc<dyn LlmPort>,
     pub provider_id: String,
     pub limits: LoopLimits,
     /// Live view of tools currently executing (shared with the TUI).
@@ -197,6 +199,7 @@ pub fn assemble(
         rp = override_url(rp, url);
     }
     let llm = build_llm(&rp)?;
+    let llm_for_queries = llm.clone();
     let shell = Arc::new(TokioCommandShell::new(120));
     let fsys = Arc::new(HostFileSystem);
     let active_tools: std::sync::Arc<std::sync::Mutex<Vec<String>>> =
@@ -254,6 +257,7 @@ pub fn assemble(
     let agent: Arc<dyn AgentPort> = Arc::new(agent_loop);
     Ok(Wiring {
         agent,
+        llm: llm_for_queries,
         provider_id: pid.clone(),
         limits: LoopLimits::default(),
         active_tools,

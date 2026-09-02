@@ -66,6 +66,12 @@ impl std::error::Error for LlmError {}
 /// LLM provider HTTP client. Domain and application depend on this trait only.
 #[async_trait]
 pub trait LlmPort: Send + Sync {
+    /// List model ids available on this provider, when the API supports it.
+    /// Default: unsupported (empty list).
+    async fn list_models(&self) -> Result<Vec<String>, LlmError> {
+        Ok(vec![])
+    }
+
     /// Generate one assistant turn from a chat transcript, offering the model
     /// the given tools to call. Implementations may populate
     /// [`AgentResponse::tool_calls`] when the model requests tool use.

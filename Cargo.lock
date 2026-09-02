@@ -484,7 +484,7 @@ checksum = "e4eba85ea1d0a966a983acd07deee566e67395d2d96b6fb39e62b5a833f1eb0b"
 
 [[package]]
 name = "harxes-app"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "async-recursion",
  "async-trait",
@@ -497,7 +497,7 @@ dependencies = [
 
 [[package]]
 name = "harxes-cli"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "clap",
  "crossterm",
@@ -518,7 +518,7 @@ dependencies = [
 
 [[package]]
 name = "harxes-core-domain"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "async-trait",
  "serde",
@@ -528,14 +528,14 @@ dependencies = [
 
 [[package]]
 name = "harxes-infra-auth"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "harxes-core-domain",
 ]
 
 [[package]]
 name = "harxes-infra-fs"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "async-trait",
  "glob",
@@ -546,7 +546,7 @@ dependencies = [
 
 [[package]]
 name = "harxes-infra-llm"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "async-trait",
  "futures-util",
@@ -560,7 +560,7 @@ dependencies = [
 
 [[package]]
 name = "harxes-infra-mcp"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "async-trait",
  "harxes-core-domain",
@@ -570,7 +570,7 @@ dependencies = [
 
 [[package]]
 name = "harxes-infra-session"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "harxes-core-domain",
  "serde",
@@ -579,7 +579,7 @@ dependencies = [
 
 [[package]]
 name = "harxes-infra-shell"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "async-trait",
  "harxes-core-domain",
@@ -589,7 +589,7 @@ dependencies = [
 
 [[package]]
 name = "harxes-infra-web"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "async-trait",
  "harxes-core-domain",
