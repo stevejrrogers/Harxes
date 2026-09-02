@@ -428,7 +428,10 @@ impl LlmPort for OpenAiClient {
                         if let Some(t) =
                             delta.get("reasoning_content").and_then(|x| x.as_str())
                         {
-                            reasoning.push_str(t);
+                            if !t.is_empty() {
+                                reasoning.push_str(t);
+                                sink(StreamEvent::Reasoning(t.to_string()));
+                            }
                         }
                         if let Some(tcs) = delta.get("tool_calls").and_then(|x| x.as_array()) {
                             for tc in tcs {

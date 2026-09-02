@@ -181,6 +181,8 @@ pub struct Wiring {
     pub mcp_status: Vec<String>,
     /// Fully-qualified names (`mcp__server__tool`) of connected MCP tools.
     pub mcp_tools: Vec<String>,
+    /// Shared live reasoning buffer for the "thinking" display.
+    pub reasoning: std::sync::Arc<std::sync::Mutex<String>>,
 }
 
 /// Assemble a fully-wired agent for the given (optional) provider id. The CLI
@@ -205,10 +207,13 @@ pub fn assemble(
     let active_tools: std::sync::Arc<std::sync::Mutex<Vec<String>>> =
         std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
     let streamed = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let reasoning_buf: std::sync::Arc<std::sync::Mutex<String>> =
+        std::sync::Arc::new(std::sync::Mutex::new(String::new()));
     let observer = crate::ui::LiveToolObserver {
         active: active_tools.clone(),
         streamed: streamed.clone(),
         deltas: stream_delta_sink.clone(),
+        reasoning: reasoning_buf.clone(),
     };
     let approval_gate = Arc::new(ApprovalGate::default());
     let decider = Arc::new(GateDecider(approval_gate.clone()));
@@ -276,6 +281,7 @@ pub fn assemble(
         todos,
         mcp_status,
         mcp_tools,
+        reasoning: reasoning_buf,
     })
 }
 

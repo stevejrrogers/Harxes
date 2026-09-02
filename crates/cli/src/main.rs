@@ -321,6 +321,7 @@ fn run_repl(
     // The tasks panel renders straight from the agent-managed todo store, so
     // Todo-tool writes show up live while the agent is working.
     state.todos = wiring.todos.clone();
+    state.reasoning = wiring.reasoning.clone();
     state.active_tools = wiring.active_tools.clone();
 
     use harxes_core_domain::domain::value_objects::Role;
@@ -901,6 +902,8 @@ fn run_repl(
                     st.streaming_turn = true;
                     st.live_text.push_str(&delta);
                     st.typing_text = st.live_text.clone();
+                    // Real text is arriving — thinking is done for this turn.
+                    st.reasoning.lock().unwrap().clear();
                 }
             }
             // Surface any outstanding approval request for the user to answer.
@@ -949,6 +952,7 @@ fn run_repl(
                         st.streaming_turn = false;
                         st.live_text.clear();
                         st.active_tools.lock().unwrap().clear();
+                        st.reasoning.lock().unwrap().clear();
                     }
                     Err(e) => {
                         st.active_tools.lock().unwrap().clear();
@@ -1101,11 +1105,13 @@ async fn run_turn_owned(
                 }
                 // Pair each requested tool call with its result.
                 for tc in &m.tool_calls {
-                    let detail = tool_preview(tc.name.as_str(), tc.arguments.as_str());
+                    let detail = harxes_core_domain::domain::services::tool_protocol::tool_summary(
+                        tc.name.as_str(),
+                        tc.arguments.as_str(),
+                    );
                     match results.get(&tc.id) {
-                        Some(out) => {
-                            lines.push(tui::ChatLine::Tool(format!("{detail}\n    → {out}")))
-                        }
+                        Some(out) => lines
+                            .push(tui::ChatLine::Tool(format!("{detail}\n{}", pretty_result(out)))),
                         None => lines.push(tui::ChatLine::Tool(detail)),
                     }
                 }
@@ -1119,14 +1125,33 @@ async fn run_turn_owned(
     }
 }
 
-/// Compact one-line label for a tool invocation, e.g. "Bash: echo hi".
-fn tool_preview(name: &str, args: &str) -> String {
-    let trimmed = args.trim();
-    if trimmed.is_empty() {
-        name.to_string()
+/// Format a tool result for the collapsed tool row: a short, readable summary
+/// (exit code / line count) plus the first lines of output, indented.
+fn pretty_result(out: &str) -> String {
+    let t = out.trim();
+    // Bash results look like "exit=0 stdout=... stderr=...": surface the code.
+    let head = if let Some(rest) = t.strip_prefix("exit=") {
+        let code = rest.split_whitespace().next().unwrap_or("?");
+        let ok = code == "0";
+        format!("    {} exit {code}", if ok { "✓" } else { "✗" })
     } else {
-        let head: String = trimmed.chars().take(80).collect();
-        format!("{name}: {head}")
+        let n = t.lines().count();
+        format!("    ✓ {n} line{}", if n == 1 { "" } else { "s" })
+    };
+    // Add up to 3 preview lines of the body.
+    let body: Vec<String> = t
+        .lines()
+        .filter(|l| !l.trim().is_empty())
+        .take(3)
+        .map(|l| {
+            let s: String = l.chars().take(96).collect();
+            format!("    {s}")
+        })
+        .collect();
+    if body.is_empty() {
+        head
+    } else {
+        format!("{head}\n{}", body.join("\n"))
     }
 }
 
@@ -1263,12 +1288,17 @@ mod tests {
     }
 
     #[test]
-    fn tool_preview_formats() {
-        assert_eq!(tool_preview("Bash", "echo hi"), "Bash: echo hi");
-        assert_eq!(tool_preview("Read", ""), "Read");
-        // long args truncated
-        let long = "x".repeat(200);
-        let p = tool_preview("Write", &long);
-        assert!(p.len() < 100);
+    fn tool_summary_extracts_key_arg() {
+        use harxes_core_domain::domain::services::tool_protocol::tool_summary;
+        assert_eq!(
+            tool_summary("Bash", r#"{"command":"cargo test"}"#),
+            "Bash cargo test"
+        );
+        assert_eq!(
+            tool_summary("Read", r#"{"path":"src/main.rs"}"#),
+            "Read src/main.rs"
+        );
+        assert!(pretty_result("exit=0 stdout=ok stderr=").contains("✓ exit 0"));
+        assert!(pretty_result("exit=1 stdout= stderr=boom").contains("✗ exit 1"));
     }
 }

@@ -183,6 +183,67 @@ pub fn all_tool_specs() -> Vec<ToolSpec> {
     ]
 }
 
+/// A clean, human-facing one-line summary of a tool call: the tool name plus
+/// its single most meaningful argument, e.g. `Bash cargo test --workspace`,
+/// `Read src/main.rs`, `Edit src/lib.rs`. Falls back to the raw (trimmed)
+/// arguments for unknown shapes. Used by the UI instead of dumping raw JSON.
+pub fn tool_summary(name: &str, raw: &str) -> String {
+    let val: Option<serde_json::Value> = serde_json::from_str(raw).ok();
+    let field = |k: &str| -> Option<String> {
+        val.as_ref()
+            .and_then(|v| v.get(k))
+            .and_then(|x| x.as_str())
+            .map(|s| s.trim().to_string())
+    };
+    let arg = match ToolId::parse(name) {
+        Some(ToolId::Bash) => field("command"),
+        Some(ToolId::Read | ToolId::Write) => field("path"),
+        Some(ToolId::Edit) => field("path"),
+        Some(ToolId::Grep) => field("needle").map(|n| {
+            match field("pattern") {
+                Some(p) if !p.is_empty() => format!("{n}  in {p}"),
+                _ => n,
+            }
+        }),
+        Some(ToolId::Glob) => field("pattern"),
+        Some(ToolId::Fetch) => field("url"),
+        Some(ToolId::Search) => field("query"),
+        Some(ToolId::Delegate) => field("task"),
+        Some(ToolId::Todo) => {
+            let action = field("action").unwrap_or_else(|| "list".into());
+            let n = val
+                .as_ref()
+                .and_then(|v| v.get("todos"))
+                .and_then(|x| x.as_array())
+                .map(|a| a.len());
+            Some(match n {
+                Some(n) => format!("{action} ({n} steps)"),
+                None => action,
+            })
+        }
+        _ if name.starts_with("mcp__") => field("query").or_else(|| field("path")),
+        _ => None,
+    };
+    let display = name.strip_prefix("mcp__").unwrap_or(name);
+    match arg {
+        Some(a) if !a.is_empty() => {
+            let head: String = a.chars().take(100).collect();
+            let head = head.replace('\n', " ");
+            let ell = if a.chars().count() > 100 { "…" } else { "" };
+            format!("{display} {head}{ell}")
+        }
+        _ => {
+            let t = raw.trim();
+            if t.is_empty() {
+                display.to_string()
+            } else {
+                let head: String = t.chars().take(80).collect();
+                format!("{display} {head}")
+            }
+        }
+    }
+}
+
 /// Build a JSON-Schema object with properties of the given types, all required.
 ///
 /// `props` is a list of `(name, jsonschema_type)` pairs (e.g. `"string"`,

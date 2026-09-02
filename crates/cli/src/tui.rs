@@ -144,6 +144,9 @@ pub struct AppState {
     pub turn_started: Option<std::time::Instant>,
     /// Show tool output in full instead of collapsed one-liners (Ctrl+O).
     pub expand_tools: bool,
+    /// Live reasoning ("thinking") buffer shared with the observer; shown
+    /// dimmed while the model works, empty otherwise.
+    pub reasoning: std::sync::Arc<std::sync::Mutex<String>>,
 }
 
 impl AppState {
@@ -183,6 +186,7 @@ impl AppState {
             live_text: String::new(),
             turn_started: None,
             expand_tools: false,
+            reasoning: std::sync::Arc::new(std::sync::Mutex::new(String::new())),
         }
     }
 
@@ -650,6 +654,26 @@ fn status_panel(frame: &mut Frame, state: &AppState, area: Rect) {
     );
 }
 
+/// Word-wrap a single line into chunks of at most `w` chars (char-safe).
+fn textwrap_dim(s: &str, w: usize) -> Vec<String> {
+    let w = w.max(8);
+    let mut out = Vec::new();
+    let mut cur = String::new();
+    for word in s.split_whitespace() {
+        if cur.chars().count() + word.chars().count() + 1 > w && !cur.is_empty() {
+            out.push(std::mem::take(&mut cur));
+        }
+        if !cur.is_empty() {
+            cur.push(' ');
+        }
+        cur.push_str(word);
+    }
+    if !cur.is_empty() {
+        out.push(cur);
+    }
+    out.into_iter().take(2).collect()
+}
+
 fn tasks_panel(frame: &mut Frame, state: &AppState, area: Rect) {
     use harxes_core_domain::domain::value_objects::TodoStatus;
     // The agent-managed store is the live source of truth; the legacy
@@ -763,6 +787,27 @@ fn tasks_panel(frame: &mut Frame, state: &AppState, area: Rect) {
             format!("  {live_dot} thinking…"),
             Style::new().fg(Color::Yellow),
         )]));
+        // Show the tail of the model's live reasoning, dimmed, so a long
+        // silent thinking phase reads as active rather than frozen.
+        let think = state.reasoning.lock().map(|r| r.clone()).unwrap_or_default();
+        let tail = think.trim();
+        if !tail.is_empty() {
+            let last: String = tail
+                .replace('\n', " ")
+                .chars()
+                .rev()
+                .take(160)
+                .collect::<Vec<_>>()
+                .into_iter()
+                .rev()
+                .collect();
+            for chunk in textwrap_dim(&last, area.width.saturating_sub(4) as usize) {
+                text.push_line(Line::from(vec![Span::styled(
+                    format!("    {chunk}"),
+                    Style::new().fg(Color::DarkGray).italic(),
+                )]));
+            }
+        }
     }
     frame.render_widget(
         Paragraph::new(text).style(Style::default().bg(state.theme.bg_status).fg(Color::White)),

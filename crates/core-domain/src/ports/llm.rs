@@ -19,6 +19,9 @@ pub enum StreamEvent {
     Text(String),
     /// A tool-call request materialized during streaming.
     ToolCall(ToolCall),
+    /// A chunk of hidden reasoning (thinking) — shown live but never kept as
+    /// the final answer.
+    Reasoning(String),
 }
 
 /// Sink to which a provider pushes streaming events.

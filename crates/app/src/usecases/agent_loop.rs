@@ -198,10 +198,15 @@ impl AgentLoop {
     ) -> String {
         use harxes_core_domain::domain::services::tool_protocol::{parse_args, ParsedArgs, ToolId};
         if let Some(obs) = &self.observer {
-            obs.on_tool_start(
-                call.name.as_str(),
-                &Self::preview(call.arguments.as_str(), 80),
-            );
+            use harxes_core_domain::domain::services::tool_protocol::tool_summary;
+            // Show a clean "Bash cargo test" summary in the panel, but keep the
+            // tool name column separate so the observer can style it.
+            let summary = tool_summary(call.name.as_str(), call.arguments.as_str());
+            let arg = summary
+                .strip_prefix(call.name.as_str())
+                .map(|s| s.trim())
+                .unwrap_or(&summary);
+            obs.on_tool_start(call.name.as_str(), arg);
         }
         // pre_tool hooks may veto the call (exit code 2).
         if let Some(block_reason) = self.run_pre_hooks(call).await {
@@ -873,12 +878,18 @@ impl AgentLoop {
         // Build a sink forwarding text deltas to the observer when streaming.
         let observer = self.observer.clone();
         let sink: Option<StreamSink> = if self.stream {
-            Some(Arc::new(move |ev: StreamEvent| {
-                if let StreamEvent::Text(t) = ev {
+            Some(Arc::new(move |ev: StreamEvent| match ev {
+                StreamEvent::Text(t) => {
                     if let Some(obs) = &observer {
                         obs.on_stream_delta(&t);
                     }
                 }
+                StreamEvent::Reasoning(t) => {
+                    if let Some(obs) = &observer {
+                        obs.on_reasoning(&t);
+                    }
+                }
+                StreamEvent::ToolCall(_) => {}
             }))
         } else {
             None

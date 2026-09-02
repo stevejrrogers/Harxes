@@ -12,6 +12,10 @@ pub trait ToolObserver: Send + Sync {
     /// retrying. `wait_secs` is how long we will sleep.
     fn on_retry(&self, _wait_secs: u64) {}
 
+    /// Called incrementally with chunks of hidden reasoning as a reasoning
+    /// model thinks. Default: ignore.
+    fn on_reasoning(&self, _text: &str) {}
+
     /// Called incrementally with chunks of assistant text as the model streams
     /// its reply (used for realtime feedback). Empty by default; an
     /// implementation may echo the text or buffer it for a live view.

@@ -37,6 +37,9 @@ pub struct LiveToolObserver {
     /// token is forwarded for per-token typewriter rendering instead of being
     /// printed to stdout.
     pub deltas: Option<std::sync::mpsc::Sender<String>>,
+    /// Shared live reasoning ("thinking") buffer, shown dimmed while a
+    /// reasoning model works and cleared when real text or the turn arrives.
+    pub reasoning: Arc<Mutex<String>>,
 }
 impl ToolObserver for LiveToolObserver {
     fn on_tool_start(&self, name: &str, args_preview: &str) {
@@ -54,6 +57,19 @@ impl ToolObserver for LiveToolObserver {
         );
     }
     fn on_tool_result(&self, _name: &str, _result_preview: &str) {}
+    fn on_reasoning(&self, text: &str) {
+        if let Ok(mut r) = self.reasoning.lock() {
+            r.push_str(text);
+            // Keep only the tail so the buffer can't grow unbounded.
+            let n = r.chars().count();
+            if n > 4000 {
+                *r = r.chars().skip(n - 2000).collect();
+            }
+        }
+        // Reasoning stays hidden in non-TUI mode (it is not the answer); the
+        // buffer above is what the TUI reads to show the live thinking line.
+    }
+
     fn on_retry(&self, wait_secs: u64) {
         if std::env::var("HARXES_TUI").is_ok() {
             return;
