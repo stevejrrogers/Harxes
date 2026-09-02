@@ -14,7 +14,7 @@ mod web;
 // Re-exports form the hexagonal "driven interface" surface that infrastructure
 // adapters implement and application services consume.
 pub use config_store::{
-    ConfigStoreError, ConfigStorePort, HarxesConfig, HookRule, HooksConfig, McpServerConfig,
+    ConfigStoreError, ConfigStorePort, HarxesConfig, HookRule, HooksConfig, LimitsConfig, McpServerConfig,
     ModelPricing, ProviderConfig,
 };
 pub use dynamic_tools::DynamicToolPort;

@@ -255,11 +255,21 @@ pub fn assemble(
         agent_loop = agent_loop.with_dynamic_tools(hub);
     }
     let agent: Arc<dyn AgentPort> = Arc::new(agent_loop);
+    let mut limits = LoopLimits::default();
+    if let Some(v) = cfg.limits.max_iterations {
+        limits.max_iterations = v;
+    }
+    if let Some(v) = cfg.limits.max_total_tokens {
+        limits.max_total_tokens = v;
+    }
+    if let Some(v) = cfg.limits.context_window_tokens {
+        limits.context_window_tokens = v;
+    }
     Ok(Wiring {
         agent,
         llm: llm_for_queries,
         provider_id: pid.clone(),
-        limits: LoopLimits::default(),
+        limits,
         active_tools,
         streamed,
         approval_gate,

@@ -941,8 +941,10 @@ fn run_repl(
                         // Turn complete: stop live-stream mode for the next turn.
                         st.streaming_turn = false;
                         st.live_text.clear();
+                        st.active_tools.lock().unwrap().clear();
                     }
                     Err(e) => {
+                        st.active_tools.lock().unwrap().clear();
                         let sid = sess_cell.borrow().clone();
                         st.lines.push(tui::ChatLine::Agent(format!(
                             "error: {e}\nProgress so far is saved — retry here, or later run: harxes --resume {sid}"

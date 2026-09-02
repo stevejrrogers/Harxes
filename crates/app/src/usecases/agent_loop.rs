@@ -20,8 +20,11 @@ pub struct LoopLimits {
 impl Default for LoopLimits {
     fn default() -> Self {
         Self {
-            max_iterations: 25,
-            max_total_tokens: 128_000,
+            max_iterations: 40,
+            // Cumulative in+out across the whole turn. This is a runaway-cost
+            // backstop, not a working budget: with a large context every call
+            // re-sends ~100k input tokens, so a tight cap kills real work.
+            max_total_tokens: 1_500_000,
             context_window_tokens: 96_000,
         }
     }
@@ -1045,9 +1048,16 @@ impl AgentLoop {
         }
 
         self.persist_session(&transcript);
+        let reason = if iterations >= limits.max_iterations {
+            format!("reached the {} iteration cap", limits.max_iterations)
+        } else {
+            format!("used {total_tokens} tokens (cap {})", limits.max_total_tokens)
+        };
         Ok((
             LoopOutcome {
-                final_text: "[stopped by guardrail]".to_string(),
+                final_text: format!(
+                    "[stopped by guardrail: {reason} after {iterations} iterations. Progress is saved — reply 'continue' to keep going, or raise `limits` in ~/.harxes/config.json]"
+                ),
                 iterations,
                 usage_total_tokens: total_tokens,
                 input_tokens: total_input,

@@ -38,6 +38,17 @@ pub struct HarxesConfig {
     /// Ordered fallback models tried when the primary model fails terminally.
     #[serde(default)]
     pub fallback_models: Vec<String>,
+    /// Agent-loop guardrail overrides (absent fields keep the defaults).
+    #[serde(default)]
+    pub limits: LimitsConfig,
+}
+
+/// Optional guardrail overrides for the agent loop.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct LimitsConfig {
+    pub max_iterations: Option<usize>,
+    pub max_total_tokens: Option<u64>,
+    pub context_window_tokens: Option<u64>,
 }
 
 /// One lifecycle hook: a shell command run around tool execution. `matcher`
