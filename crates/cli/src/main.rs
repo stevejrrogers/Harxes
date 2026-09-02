@@ -462,8 +462,15 @@ fn run_repl(
                             for m in ms.iter().take(30) {
                                 st.lines.push(tui::ChatLine::Tool(format!("· {m}")));
                             }
+                            // Pre-fill a pick-list: arrows choose, Enter fills
+                            // "/model <id>", Enter again switches.
+                            st.input = "/model ".to_string();
+                            st.cursor_ix = st.input.len();
+                            st.completions =
+                                ms.iter().take(30).map(|m| format!("/model {m}")).collect();
+                            st.completion_sel = 0;
                             st.lines.push(tui::ChatLine::Tool(
-                                "switch with /model <id>".into(),
+                                "chọn model bằng ↑/↓ rồi Enter".into(),
                             ));
                         }
                         Ok(_) => st.lines.push(tui::ChatLine::Tool(

@@ -1022,12 +1022,19 @@ pub fn run(
 
                     KeyCode::Enter => {
                         if !state.completions.is_empty() {
-                            if let Some(c) = state.completions.get(state.completion_sel) {
-                                state.input = c.clone();
-                                state.cursor_ix = state.input.len();
-                            }
+                            let picked = state
+                                .completions
+                                .get(state.completion_sel)
+                                .cloned()
+                                .unwrap_or_default();
                             state.completions.clear();
-                            continue;
+                            // Accepting a completion that already equals what
+                            // was typed would eat the Enter — submit instead.
+                            if picked.trim() != state.input.trim() {
+                                state.input = picked;
+                                state.cursor_ix = state.input.len();
+                                continue;
+                            }
                         }
                         let wants_newline = k.modifiers.contains(KeyModifiers::ALT)
                             || k.modifiers.contains(KeyModifiers::SHIFT);
@@ -1251,7 +1258,15 @@ fn completion_menu(frame: &mut Frame, completions: &[String], selected: usize, a
         return;
     }
     let shown = completions.len().min(5);
-    let w = 24u16;
+    // Size the popup to its content (within reason).
+    let w = completions
+        .iter()
+        .take(shown)
+        .map(|c| c.chars().count())
+        .max()
+        .unwrap_or(20)
+        .clamp(20, 44) as u16
+        + 4;
     let mut h = (shown as u16) + 2;
     let x = 1u16;
     // Keep the menu within the terminal height.
