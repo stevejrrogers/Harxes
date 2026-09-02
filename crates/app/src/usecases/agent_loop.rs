@@ -995,8 +995,16 @@ impl AgentLoop {
 
             if resp.tool_calls.is_empty() {
                 self.persist_session(&transcript);
+                // A turn that ends with no text at all (some reasoning models
+                // finish a tool sequence emitting only hidden reasoning) must
+                // never render as a blank screen.
+                let final_text = if resp.content.trim().is_empty() {
+                    "(the model finished without a text reply — it may consider the task done, or need a more specific instruction)".to_string()
+                } else {
+                    resp.content.clone()
+                };
                 let out = LoopOutcome {
-                    final_text: resp.content.clone(),
+                    final_text,
                     iterations,
                     usage_total_tokens: total_tokens,
                     input_tokens: total_input,
