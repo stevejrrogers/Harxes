@@ -124,7 +124,7 @@ fn run_one_shot(wiring: &compose::Wiring, cli: &Cli, prompt: &str) {
             wiring.streamed.store(false, std::sync::atomic::Ordering::Relaxed);
             let history = vec![Message::new(Role::System, system.clone())];
             let user = harxes_core_domain::domain::value_objects::Message::user_with_images(
-                prompt.to_string(),
+                expand_file_mentions(prompt),
                 attach_images(prompt),
             );
             match wiring
@@ -221,6 +221,35 @@ fn base64_encode(data: &[u8]) -> String {
     out
 }
 
+/// Expand `@path` mentions in a user message: for each `@relative/path` that
+/// points at an existing readable text file, append its contents so the model
+/// has them in context. The original text is preserved. Non-existent or
+/// binary/huge files are left as-is (the model can still Read them).
+fn expand_file_mentions(msg: &str) -> String {
+    const MAX: u64 = 100_000;
+    let mut appendix = String::new();
+    let mut seen = std::collections::HashSet::new();
+    for token in msg.split_whitespace() {
+        let Some(raw) = token.strip_prefix('@') else { continue };
+        let path = raw.trim_end_matches([',', '.', ';', ':', ')']);
+        if path.is_empty() || !seen.insert(path.to_string()) {
+            continue;
+        }
+        let Ok(meta) = std::fs::metadata(path) else { continue };
+        if !meta.is_file() || meta.len() > MAX {
+            continue;
+        }
+        if let Ok(content) = std::fs::read_to_string(path) {
+            appendix.push_str(&format!("\n\n--- {path} ---\n{content}"));
+        }
+    }
+    if appendix.is_empty() {
+        msg.to_string()
+    } else {
+        format!("{msg}\n\n[Referenced files:]{appendix}")
+    }
+}
+
 /// Scan a prompt for existing image-file paths and load them as attachments
 /// (vision input). The prompt text is left untouched.
 fn attach_images(prompt: &str) -> Vec<harxes_core_domain::domain::value_objects::ImageData> {
@@ -268,7 +297,9 @@ Commands
   /mcp           list connected MCP servers and tools
   /theme <d|l>   dark or light
   /export <file> write the transcript to <file>.md
-  /exit          quit  (Ctrl-C cancels a running turn)";
+  /exit          quit  (Ctrl-C cancels a running turn)
+
+Tip: mention @path/to/file to pull a file into the message.";
 
 fn build_system_prompt() -> String {
     let cwd = std::env::current_dir()
@@ -837,15 +868,21 @@ fn run_repl(
                         &wiring.limits,
                     )) {
                         Ok(res) => {
+                            let before = tb.len();
                             let summary = res.outcome.final_text.clone();
                             *tb = vec![Message::new(
                                 Role::System,
                                 format!("Previous conversation summary: {summary}"),
                             )];
-                            st.lines
-                                .push(tui::ChatLine::Tool("context compacted".into()));
-                            st.lines
-                                .push(tui::ChatLine::Agent(format!("summary: {summary}")));
+                            // Reset the visible transcript to match, so screen
+                            // and context don't desync; keep a short recap.
+                            st.lines.clear();
+                            st.scroll = 0;
+                            st.auto_scroll = true;
+                            st.lines.push(tui::ChatLine::Tool(format!(
+                                "context compacted — {before} messages → 1 summary"
+                            )));
+                            st.lines.push(tui::ChatLine::Agent(summary));
                         }
                         Err(e) => st.lines.push(tui::ChatLine::Agent(format!("error: {e}"))),
                     }
@@ -1140,8 +1177,10 @@ async fn run_turn_owned(
         messages.insert(0, Message::new(Role::System, system));
     }
     let images = attach_images(&user_msg);
+    // Expand @path references by appending the referenced files' contents.
+    let augmented = expand_file_mentions(&user_msg);
     let user = harxes_core_domain::domain::value_objects::Message::user_with_images(
-        user_msg.clone(),
+        augmented,
         images,
     );
     match agent
@@ -1334,6 +1373,20 @@ fn estimate_cost(model: &str, in_tok: u64, out_tok: u64) -> f64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn file_mentions_expand_existing_files_only() {
+        let dir = std::env::temp_dir().join(format!("hx-at-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let f = dir.join("note.txt");
+        std::fs::write(&f, "hello from file").unwrap();
+        let msg = format!("look at @{} and @/nope/missing.txt", f.display());
+        let out = expand_file_mentions(&msg);
+        assert!(out.contains("hello from file"));
+        assert!(out.contains("Referenced files"));
+        // A message with no mentions is returned unchanged.
+        assert_eq!(expand_file_mentions("just text"), "just text");
+    }
 
     #[test]
     fn base64_encodes_rfc_vectors() {

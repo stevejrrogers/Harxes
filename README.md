@@ -24,6 +24,8 @@ harxes
 - **Permissions** — dangerous commands prompt y/n in the TUI; config `commands.allow`/`deny` skip or hard-block by pattern; file edits show a colored diff before applying.
 - **Sessions & cost** — resume with `--resume <id>` (plan included), per-model token/cost report via `/cost` and at exit.
 
+- **File mentions** — write `@path/to/file` in a message to pull that file's contents into context.
+
 ## Providers
 
 Anthropic and any OpenAI-compatible endpoint (LiteLLM, local servers):
