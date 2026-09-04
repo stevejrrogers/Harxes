@@ -142,18 +142,26 @@ fn run_one_shot(wiring: &compose::Wiring, cli: &Cli, prompt: &str) {
                         eprintln!(
                             "{}",
                             ui::C::yellow(&format!(
-                                "[stopped by guardrail after {} iterations]",
+                                "⚠ stopped by guardrail after {} iterations",
                                 out.iterations
                             ))
                         );
                     }
-                    println!(
-                        "{} {}",
-                        ui::C::dim("[iterations=]"),
-                        ui::C::dim(&out.iterations.to_string())
+                    // Quiet, informative footer: tokens + estimated cost.
+                    let cost = estimate_cost(&model, out.input_tokens, out.output_tokens);
+                    eprintln!(
+                        "{}",
+                        ui::C::dim(&format!(
+                            "· {} iterations · {} tokens (↑{} ↓{}) · ${:.4}",
+                            out.iterations,
+                            out.usage_total_tokens,
+                            out.input_tokens,
+                            out.output_tokens,
+                            cost
+                        ))
                     );
                 }
-                Err(e) => eprintln!("harxes:{e}"),
+                Err(e) => eprintln!("{}", ui::C::yellow(&format!("harxes error: {e}"))),
             }
         }),
         Err(e) => {
@@ -243,6 +251,25 @@ fn attach_images(prompt: &str) -> Vec<harxes_core_domain::domain::value_objects:
 
 /// The base system prompt: identity, environment, and working discipline.
 /// Workspace context (project guide, notes) is appended by the caller.
+/// The `/help` panel: every command, aligned, matching what's implemented.
+const HELP_TEXT: &str = "\
+Commands
+  /help          show this help
+  /clear         clear the screen
+  /model <id>    switch model      · /models  list models on this provider
+  /cost          tokens + estimated cost
+  /compact       summarize the conversation to free context
+  /undo          drop the last exchange
+  /sessions      list saved sessions   · /resume <id>  load one (or --resume last)
+  /plan <task>   break a task into a checklist
+  /todo ...      list | done <n> | add <text> | clear
+  /remember <x>  save a note to project memory (.harxes/agents/NOTES.md)
+  /init          generate a HARXES.md project guide
+  /mcp           list connected MCP servers and tools
+  /theme <d|l>   dark or light
+  /export <file> write the transcript to <file>.md
+  /exit          quit  (Ctrl-C cancels a running turn)";
+
 fn build_system_prompt() -> String {
     let cwd = std::env::current_dir()
         .map(|p| p.display().to_string())
@@ -259,23 +286,40 @@ fn build_system_prompt() -> String {
     }
     format!(
         "You are Harxes, a coding agent running in the user's terminal. You complete tasks \
-         by calling tools; your final text is shown to the user.\n\n\
+         by calling tools; only your final text is shown to the user.\n\n\
          # Environment\n{env}\n\n\
-         # How to work\n\
-         - For any task with more than one step, first write a plan with the Todo tool \
+         # Understand before you change\n\
+         - Explore first. For anything non-trivial, use Grep/Glob/List/Read to find the \
+         relevant files and understand how the feature is wired before editing. Don't guess \
+         at file contents — read them.\n\
+         - Follow the project's conventions: match the style, naming, and structure of \
+         nearby code. Before using a library, confirm it's already a dependency (check the \
+         manifest / imports); don't introduce new ones without reason.\n\
+         - Check AGENTS.md / HARXES.md and any build/lint config for how this project \
+         expects work to be done.\n\n\
+         # Plan and execute\n\
+         - For a task with more than one step, first write a plan with the Todo tool \
          (action=write), keep exactly one item in_progress, and mark items completed as you \
          finish them.\n\
-         - Prefer dedicated tools (Read, Write, Edit, Grep, Glob) over shell equivalents; \
-         use Bash for builds, tests and everything else.\n\
-         - Verify your work: after changing code, run the project's build or tests before \
-         declaring success. Report failures honestly.\n\
-         - Use Delegate for self-contained sub-tasks that would bloat your context.\n\
-         - Match the surrounding code style. Never invent file contents — read before \
-         editing.\n\
-         - Be concise: answer directly, no preamble or restating the task. Use markdown \
-         sparingly.\n\
-         - Never run destructive commands (rm -rf, force-push, resets) unless the user \
-         explicitly asked for that exact operation."
+         - Prefer the dedicated tools (Read, Edit, Write, Grep, Glob, List) over shell \
+         equivalents (cat/grep/find/ls); use Bash for builds, tests, git, and package tools. \
+         Bash resets to the project root each call — use absolute paths or chain with &&.\n\
+         - Make surgical edits with Edit; use Write only for new files or full rewrites.\n\
+         - Use Delegate for self-contained investigations that would bloat your context; \
+         issuing several Delegate calls at once runs them in parallel.\n\n\
+         # Verify and finish\n\
+         - After changing code, run the project's build or tests before declaring success. \
+         Report failures honestly — never claim something works if you haven't checked.\n\
+         - When done, briefly state what you changed and why. Be concise: no preamble, no \
+         restating the task, sparing markdown. Don't paste large file dumps back at the user.\n\
+         - If the request is genuinely ambiguous, ask one clarifying question instead of \
+         guessing; otherwise make a reasonable assumption, state it, and proceed.\n\n\
+         # Safety\n\
+         - Explain a side-effecting command before running it. Never run destructive \
+         commands (rm -rf, force-push, hard reset, disk writes, piping downloads to a shell) \
+         unless the user explicitly asked for that exact operation.\n\
+         - Do not commit or push unless asked. Assist with defensive security and \
+         legitimate work; decline to build malware or exfiltrate secrets."
     )
 }
 
@@ -414,8 +458,8 @@ fn run_repl(
             // Slash commands handled here.
             match t.as_str() {
                 "/help" => {
-                    st.lines.push(tui::ChatLine::Agent(String ::from("/help      this help\n/clear     clear the screen\n/cost      total tokens used\n/model X   switch model\n/compact   summarize context\n/sessions  list saved sessions\n/remember X save a note to agent memory\n/resume I  load saved session by id\n/plan T    break task T into a checklist
-/theme D|L   switch light/dark theme\n/models    list models on this provider\n/todo done N   tick item N on the plan\n/init      generate a HARXES.md project guide\n/mcp       list connected MCP servers and tools\n/export F  write transcript to file F.md\n/cost      tokens + estimated cost\n/exit      quit")));
+                    st.lines
+                        .push(tui::ChatLine::Agent(String::from(HELP_TEXT)));
                     return;
                 }
                 "/cost" => {
@@ -471,7 +515,7 @@ fn run_repl(
                                 ms.iter().take(30).map(|m| format!("/model {m}")).collect();
                             st.completion_sel = 0;
                             st.lines.push(tui::ChatLine::Tool(
-                                "chọn model bằng ↑/↓ rồi Enter".into(),
+                                "pick a model with ↑/↓ then Enter".into(),
                             ));
                         }
                         Ok(_) => st.lines.push(tui::ChatLine::Tool(
@@ -529,14 +573,34 @@ fn run_repl(
                             *trx.borrow_mut() = rec.transcript.clone();
                             *sess_cell.borrow_mut() = id.clone();
                             st.lines.clear();
+                            // Replay the whole conversation, not just the user
+                            // side, so a resumed session reads like it did.
                             for m in &rec.transcript {
-                                if m.role == Role::User {
-                                    st.lines.push(tui::ChatLine::User(m.content.clone()));
+                                match m.role {
+                                    Role::User => st
+                                        .lines
+                                        .push(tui::ChatLine::User(m.content.clone())),
+                                    Role::Assistant if !m.content.trim().is_empty() => st
+                                        .lines
+                                        .push(tui::ChatLine::Agent(m.content.clone())),
+                                    Role::Assistant => {
+                                        for tc in &m.tool_calls {
+                                            let d = harxes_core_domain::domain::services::tool_protocol::tool_summary(
+                                                tc.name.as_str(),
+                                                tc.arguments.as_str(),
+                                            );
+                                            st.lines.push(tui::ChatLine::Tool(d));
+                                        }
+                                    }
+                                    _ => {}
                                 }
                             }
+                            *wiring.todos.lock().unwrap() = rec.todos.clone();
                             st.scroll = 0;
-                            st.lines
-                                .push(tui::ChatLine::Tool(format!("resumed session {id}")));
+                            st.lines.push(tui::ChatLine::Tool(format!(
+                                "resumed session {id} ({} messages)",
+                                rec.transcript.len()
+                            )));
                         }
                         None => st
                             .lines
@@ -837,6 +901,12 @@ fn run_repl(
             }
 
             if t.starts_with('/') {
+                // Unrecognized slash command: tell the user instead of
+                // silently swallowing it.
+                let cmd = t.split_whitespace().next().unwrap_or("/");
+                st.lines.push(tui::ChatLine::Agent(format!(
+                    "unknown command {cmd} — type /help for the list"
+                )));
                 return;
             }
             // First message of a fresh session: bake a readable slug into the

@@ -160,7 +160,11 @@ pub struct AnthropicClient {
 impl AnthropicClient {
     pub fn new(base_url: impl Into<String>, api_key: impl Into<String>) -> Self {
         Self {
-            http: reqwest::Client::new(),
+            http: reqwest::Client::builder()
+                .connect_timeout(std::time::Duration::from_secs(20))
+                .read_timeout(std::time::Duration::from_secs(120))
+                .build()
+                .unwrap_or_default(),
             // `base_url` is a FULL endpoint URL (e.g. .../v1/messages).
             // Do NOT append any path here to avoid double-path bugs.
             base_url: base_url.into().trim_end_matches('/').to_string(),

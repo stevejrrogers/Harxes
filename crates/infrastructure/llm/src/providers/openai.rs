@@ -131,6 +131,38 @@ fn build_tools(tools: &[ToolSpec]) -> Vec<ToolDef<'_>> {
       }).collect()
 }
 
+/// Parse the `Retry-After` header (seconds form) into a value for backoff.
+fn retry_after_secs(resp: &reqwest::Response) -> Option<u64> {
+    resp.headers()
+        .get(reqwest::header::RETRY_AFTER)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|s| s.trim().parse::<u64>().ok())
+}
+
+/// Consume a failed response into a readable error, surfacing the API's own
+/// error message (JSON `error.message` or raw body, capped) so the user sees
+/// *why* — e.g. "context length exceeded", "model not found".
+async fn http_error(resp: reqwest::Response, hint: &str) -> LlmError {
+    let status = resp.status();
+    let body = resp.text().await.unwrap_or_default();
+    let detail = serde_json::from_str::<serde_json::Value>(&body)
+        .ok()
+        .and_then(|v| {
+            v.get("error")
+                .and_then(|e| e.get("message"))
+                .and_then(|m| m.as_str())
+                .map(|s| s.to_string())
+                .or_else(|| v.get("message").and_then(|m| m.as_str()).map(|s| s.to_string()))
+        })
+        .unwrap_or_else(|| body.chars().take(300).collect());
+    let detail = detail.trim();
+    if detail.is_empty() {
+        LlmError::Request(format!("HTTP {status}{hint}"))
+    } else {
+        LlmError::Request(format!("HTTP {status}{hint}: {detail}"))
+    }
+}
+
 #[derive(Serialize)]
 struct RequestBody<'a> {
     model: &'a str,
@@ -202,7 +234,11 @@ impl OpenAiClient {
             url.push_str("/chat/completions");
         }
         Self {
-            http: reqwest::Client::new(),
+            http: reqwest::Client::builder()
+                .connect_timeout(std::time::Duration::from_secs(20))
+                .read_timeout(std::time::Duration::from_secs(120))
+                .build()
+                .unwrap_or_default(),
             base_url: url,
             api_key: api_key.into(),
         }
@@ -277,7 +313,9 @@ impl LlmPort for OpenAiClient {
         if resp.status().is_server_error()
             || resp.status() == reqwest::StatusCode::TOO_MANY_REQUESTS
         {
-            return Err(LlmError::RateLimited { retry_after: None });
+            return Err(LlmError::RateLimited {
+                retry_after: retry_after_secs(&resp),
+            });
         }
         if resp.status() == reqwest::StatusCode::UNAUTHORIZED
             || resp.status() == reqwest::StatusCode::FORBIDDEN
@@ -292,7 +330,7 @@ impl LlmPort for OpenAiClient {
             } else {
                 String::new()
             };
-            return Err(LlmError::Request(format!("HTTP {}{hint}", resp.status())));
+            return Err(http_error(resp, &hint).await);
         }
         let rb: ResponseBody = resp
             .json()

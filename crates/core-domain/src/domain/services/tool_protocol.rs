@@ -18,6 +18,7 @@ pub enum ToolId {
     Todo,
     Fetch,
     Search,
+    List,
 }
 
 impl ToolId {
@@ -33,6 +34,7 @@ impl ToolId {
             ToolId::Todo => "Todo",
             ToolId::Fetch => "Fetch",
             ToolId::Search => "Search",
+            ToolId::List => "List",
         }
     }
     pub fn parse(name: &str) -> Option<ToolId> {
@@ -47,6 +49,7 @@ impl ToolId {
             "Todo" | "todo" => Some(ToolId::Todo),
             "Fetch" | "fetch" | "WebFetch" | "webfetch" => Some(ToolId::Fetch),
             "Search" | "search" | "WebSearch" | "websearch" => Some(ToolId::Search),
+            "List" | "list" | "LS" | "ls" => Some(ToolId::List),
             _ => None,
         }
     }
@@ -65,6 +68,7 @@ pub enum ParsedArgs {
     Todo { action: TodoAction, items: Vec<TodoItem> },
     Fetch { url: String },
     Search { query: String },
+    List { path: String },
 }
 
 /// The full set of tool specifications offered to the model.
@@ -72,7 +76,7 @@ pub fn all_tool_specs() -> Vec<ToolSpec> {
     vec![
         ToolSpec::with_schema(
             "Bash",
-            "Run a shell command and capture its output.",
+            "Run a non-interactive shell command and capture its output. The working directory resets to the project root each call, so use absolute paths or chain with && (e.g. `cd sub && cargo test`). Output is capped; prefer Read/Grep/Glob/List over cat/grep/find/ls.",
             obj_schema(vec![("command", "string")]),
         ),
         ToolSpec::with_schema(
@@ -92,7 +96,7 @@ pub fn all_tool_specs() -> Vec<ToolSpec> {
         ),
         ToolSpec::with_schema(
             "Write",
-            "Write content to a file on disk.",
+            "Create a file or overwrite it entirely with new content (parent directories are created). Prefer Edit for changing part of an existing file — Write replaces the whole thing.",
             obj_schema(vec![("path", "string"), ("content", "string")]),
         ),
         ToolSpec::with_schema(
@@ -106,7 +110,7 @@ pub fn all_tool_specs() -> Vec<ToolSpec> {
         ),
         ToolSpec::with_schema(
             "Grep",
-            "Search files for a pattern (regular expression or plain text) under a glob path.",
+            "Search file contents for `needle` (a regular expression or plain text). `pattern` limits the file scope by glob (default all files); the result lists file:line matches. Use this instead of `bash grep`.",
             obj_schema(vec![
                 ("needle", "string"),
                 ("pattern", "string"),
@@ -115,8 +119,18 @@ pub fn all_tool_specs() -> Vec<ToolSpec> {
         ),
         ToolSpec::with_schema(
             "Glob",
-            "List files matching a glob pattern (e.g. **/*.rs).",
+            "Find files by glob pattern (e.g. **/*.rs), newest first. Use when you know the name shape but not the location.",
             obj_schema(vec![("pattern", "string"), ("max_depth", "integer")]),
+        ),
+        ToolSpec::with_schema(
+            "List",
+            "List the entries of a directory (directories marked with a trailing /). Use to explore an unfamiliar tree before reading files. Defaults to the current directory.",
+            {
+                serde_json::json!({
+                    "type": "object",
+                    "properties": { "path": { "type": "string", "description": "Directory to list (default '.')" } },
+                })
+            },
         ),
         ToolSpec::with_schema(
             "Delegate",
@@ -206,6 +220,7 @@ pub fn tool_summary(name: &str, raw: &str) -> String {
             }
         }),
         Some(ToolId::Glob) => field("pattern"),
+        Some(ToolId::List) => field("path"),
         Some(ToolId::Fetch) => field("url"),
         Some(ToolId::Search) => field("query"),
         Some(ToolId::Delegate) => field("task"),
@@ -345,6 +360,14 @@ pub fn parse_args(tool: ToolId, raw: &str) -> ParsedArgs {
                         query: query.to_string(),
                     };
                 }
+                ToolId::List => {
+                    let path = obj
+                        .get("path")
+                        .and_then(|x| x.as_str())
+                        .unwrap_or(".")
+                        .to_string();
+                    return ParsedArgs::List { path };
+                }
                 ToolId::Todo => {
                     let action = obj
                         .get("action")
@@ -427,6 +450,12 @@ pub fn parse_args(tool: ToolId, raw: &str) -> ParsedArgs {
         },
         ToolId::Search => ParsedArgs::Search {
             query: raw.trim().to_string(),
+        },
+        ToolId::List => ParsedArgs::List {
+            path: {
+                let t = raw.trim();
+                if t.is_empty() { ".".to_string() } else { t.to_string() }
+            },
         },
         ToolId::Todo => ParsedArgs::Todo {
             action: TodoAction::List,
