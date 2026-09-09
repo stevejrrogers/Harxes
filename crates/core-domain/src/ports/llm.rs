@@ -68,6 +68,7 @@ impl std::error::Error for LlmError {}
 /// Driven port (hexagonal): infrastructure implements this with a concrete
 /// LLM provider HTTP client. Domain and application depend on this trait only.
 #[async_trait]
+#[allow(clippy::too_many_arguments)]
 pub trait LlmPort: Send + Sync {
     /// List model ids available on this provider, when the API supports it.
     /// Default: unsupported (empty list).
@@ -85,6 +86,7 @@ pub trait LlmPort: Send + Sync {
         messages: &[Message],
         tools: &[ToolSpec],
         temperature: Option<f64>,
+        reasoning_effort: Option<crate::domain::value_objects::ReasoningEffort>,
     ) -> Result<AgentResponse, LlmError>;
 
     /// Generate a turn while pushing streaming [`StreamEvent`]s into `sink`
@@ -101,10 +103,11 @@ pub trait LlmPort: Send + Sync {
         messages: &[Message],
         tools: &[ToolSpec],
         temperature: Option<f64>,
+        reasoning_effort: Option<crate::domain::value_objects::ReasoningEffort>,
         sink: StreamSink,
     ) -> Result<AgentResponse, LlmError> {
         let resp = self
-            .generate(provider, model_id, messages, tools, temperature)
+            .generate(provider, model_id, messages, tools, temperature, reasoning_effort)
             .await?;
         if !resp.content.is_empty() {
             sink(StreamEvent::Text(resp.content.clone()));

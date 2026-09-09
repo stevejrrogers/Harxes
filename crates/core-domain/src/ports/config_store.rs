@@ -41,6 +41,9 @@ pub struct HarxesConfig {
     /// Agent-loop guardrail overrides (absent fields keep the defaults).
     #[serde(default)]
     pub limits: LimitsConfig,
+    /// Default reasoning effort: "low" | "medium" | "high" (absent = provider default).
+    #[serde(default)]
+    pub reasoning_effort: Option<String>,
 }
 
 /// Optional guardrail overrides for the agent loop.

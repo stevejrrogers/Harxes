@@ -31,7 +31,7 @@ use harxes_core_domain::ports::{LlmError, LlmPort, PermissionDecider, ToolObserv
 // results, so hosts depend on `harxes-core` alone (not the internal crates).
 pub use harxes_app::usecases::agent_loop::LoopLimits;
 pub use harxes_core_domain::domain::value_objects::{
-    CommandPolicy, Message, Message as ChatMessage,
+    CommandPolicy, Message, Message as ChatMessage, ReasoningEffort,
 };
 pub use harxes_core_domain::ports::{
     CommandOutput, FileSystemPort, ShellError, ShellExitStatus, ShellPort,
@@ -73,6 +73,9 @@ pub struct EngineConfig {
     /// Shell allow/deny rules applied to Bash commands.
     pub command_policy: CommandPolicy,
     pub permission: PermissionMode,
+    /// Default reasoning effort (Low/Medium/High). `None` = provider default.
+    /// Overridable per-run via [`RunRequest::reasoning_effort`].
+    pub reasoning_effort: Option<ReasoningEffort>,
     /// Host-provided confined shell (sandbox passthrough). Defaults to a plain
     /// process-group shell with kill-on-drop when `None`.
     pub shell: Option<Arc<dyn ShellPort>>,
@@ -92,6 +95,7 @@ impl EngineConfig {
             limits: LoopLimits::default(),
             command_policy: CommandPolicy::default(),
             permission: PermissionMode::default(),
+            reasoning_effort: None,
             shell: None,
             fs: None,
         }
@@ -120,6 +124,9 @@ pub struct RunRequest {
     /// `None` keeps the default (the default filesystem's own root / process
     /// CWD). Ignored for a host-injected `EngineConfig.fs` (the host anchors it).
     pub working_dir: Option<std::path::PathBuf>,
+    /// Per-run reasoning-effort override; falls back to
+    /// [`EngineConfig::reasoning_effort`] when `None`.
+    pub reasoning_effort: Option<ReasoningEffort>,
 }
 
 /// A live event emitted while a run executes. Consumed off the event channel.
@@ -359,6 +366,7 @@ pub struct HarxesEngine {
     limits: LoopLimits,
     command_policy: CommandPolicy,
     permission: PermissionMode,
+    reasoning_effort: Option<ReasoningEffort>,
 }
 
 impl HarxesEngine {
@@ -418,6 +426,7 @@ impl HarxesEngine {
             limits: config.limits,
             command_policy: config.command_policy,
             permission: config.permission,
+            reasoning_effort: config.reasoning_effort,
         })
     }
 
@@ -444,6 +453,8 @@ impl HarxesEngine {
         if let Some(wd) = &req.working_dir {
             agent = agent.with_working_dir(wd.to_string_lossy().to_string());
         }
+        let effort = req.reasoning_effort.or(self.reasoning_effort);
+        agent = agent.with_reasoning_effort(effort);
 
         let provider_id = self.provider_id.clone();
         let model = req.model.clone().unwrap_or_else(|| self.model.clone());
@@ -500,6 +511,7 @@ mod tests {
             _msgs: &[Message],
             _t: &[ToolSpec],
             _temp: Option<f64>,
+            _reasoning_effort: Option<harxes_core_domain::domain::value_objects::ReasoningEffort>,
         ) -> Result<AgentResponse, LlmError> {
             Ok(AgentResponse::text("done", Default::default()))
         }
@@ -535,6 +547,7 @@ mod tests {
             limits: LoopLimits::default(),
             command_policy: CommandPolicy::default(),
             permission: PermissionMode::AllowUnlessDenied,
+            reasoning_effort: None,
         }
     }
 
@@ -551,6 +564,7 @@ mod tests {
                 _msgs: &[Message],
                 _t: &[ToolSpec],
                 _temp: Option<f64>,
+                _reasoning_effort: Option<harxes_core_domain::domain::value_objects::ReasoningEffort>,
             ) -> Result<AgentResponse, LlmError> {
                 use harxes_core_domain::domain::value_objects::{ToolCall, TokenUsage};
                 let n = self.0.fetch_add(1, Ordering::SeqCst);
@@ -632,6 +646,7 @@ mod tests {
                 _msgs: &[Message],
                 _t: &[ToolSpec],
                 _temp: Option<f64>,
+                _reasoning_effort: Option<harxes_core_domain::domain::value_objects::ReasoningEffort>,
             ) -> Result<AgentResponse, LlmError> {
                 use harxes_core_domain::domain::value_objects::ToolCall;
                 let n = self.0.fetch_add(1, Ordering::SeqCst);
@@ -661,6 +676,7 @@ mod tests {
             limits: LoopLimits::default(),
             command_policy: CommandPolicy::default(),
             permission: PermissionMode::AllowUnlessDenied,
+            reasoning_effort: None,
         };
         let out = e
             .run(RunRequest {
@@ -694,6 +710,7 @@ mod tests {
                 _msgs: &[Message],
                 _t: &[ToolSpec],
                 _temp: Option<f64>,
+                _reasoning_effort: Option<harxes_core_domain::domain::value_objects::ReasoningEffort>,
             ) -> Result<AgentResponse, LlmError> {
                 futures_never().await
             }
@@ -733,6 +750,7 @@ mod tests {
                 _msgs: &[Message],
                 _t: &[ToolSpec],
                 _temp: Option<f64>,
+                _reasoning_effort: Option<harxes_core_domain::domain::value_objects::ReasoningEffort>,
             ) -> Result<AgentResponse, LlmError> {
                 use harxes_core_domain::domain::value_objects::ToolCall;
                 let n = self.0.fetch_add(1, Ordering::SeqCst);

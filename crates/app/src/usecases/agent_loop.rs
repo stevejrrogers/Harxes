@@ -71,6 +71,8 @@ pub struct AgentLoop {
     /// Defaults to "." (the process CWD); an embedding host sets the run's
     /// worktree so tools don't operate against the host's directory.
     working_dir: String,
+    /// Reasoning-effort hint sent to the provider (None = provider default).
+    reasoning_effort: Option<harxes_core_domain::domain::value_objects::ReasoningEffort>,
 }
 
 impl AgentLoop {
@@ -96,7 +98,17 @@ impl AgentLoop {
             web: None,
             fallback_models: Vec::new(),
             working_dir: ".".to_string(),
+            reasoning_effort: None,
         }
+    }
+
+    /// Set the reasoning-effort hint for LLM calls.
+    pub fn with_reasoning_effort(
+        mut self,
+        effort: Option<harxes_core_domain::domain::value_objects::ReasoningEffort>,
+    ) -> Self {
+        self.reasoning_effort = effort;
+        self
     }
 
     /// Set the working directory for Bash and relative-path tools.
@@ -967,6 +979,7 @@ impl AgentLoop {
             web: self.web.clone(),
             fallback_models: self.fallback_models.clone(),
             working_dir: self.working_dir.clone(),
+            reasoning_effort: self.reasoning_effort,
         };
         let limits = LoopLimits {
             max_iterations: 15,
@@ -1112,12 +1125,20 @@ impl AgentLoop {
                         transcript,
                         tools,
                         None,
+                        self.reasoning_effort,
                         s.clone(),
                     )
                     .await,
                 None => {
                     self.llm
-                        .generate(provider_id, model_id, transcript, tools, None)
+                        .generate(
+                            provider_id,
+                            model_id,
+                            transcript,
+                            tools,
+                            None,
+                            self.reasoning_effort,
+                        )
                         .await
                 }
             };
@@ -1449,6 +1470,7 @@ mod tests {
             messages: &[Message],
             tools: &[ToolSpec],
             _t: Option<f64>,
+            _reasoning_effort: Option<harxes_core_domain::domain::value_objects::ReasoningEffort>,
         ) -> Result<AgentResponse, LlmError> {
             let mut q = self.0.lock().unwrap();
             if q.is_empty() {
@@ -1609,6 +1631,7 @@ mod tests {
                 _m: &[Message],
                 _t: &[ToolSpec],
                 _temp: Option<f64>,
+                _reasoning_effort: Option<harxes_core_domain::domain::value_objects::ReasoningEffort>,
             ) -> Result<AgentResponse, LlmError> {
                 if model_id == "backup" {
                     Ok(AgentResponse::text("rescued", Default::default()))
@@ -2175,6 +2198,7 @@ mod tests {
                 _msgs: &[Message],
                 _t: &[ToolSpec],
                 _tt: Option<f64>,
+                _reasoning_effort: Option<harxes_core_domain::domain::value_objects::ReasoningEffort>,
             ) -> Result<AgentResponse, LlmError> {
                 let n = self.0.fetch_add(1, Ordering::SeqCst);
                 if n == 0 {

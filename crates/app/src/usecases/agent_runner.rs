@@ -87,6 +87,7 @@ impl AgentRunner {
                 messages.as_slice(),
                 &[],
                 temperature,
+                None,
             )
             .await?;
 
@@ -122,6 +123,7 @@ mod tests {
             messages: &[Message],
             _tools: &[harxes_core_domain::domain::value_objects::ToolSpec],
             _temperature: Option<f64>,
+            _reasoning_effort: Option<harxes_core_domain::domain::value_objects::ReasoningEffort>,
         ) -> Result<AgentResponse, LlmError> {
             self.calls
                 .lock()

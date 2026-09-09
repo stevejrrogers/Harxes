@@ -247,6 +247,11 @@ pub fn assemble(
     .with_observer(Arc::new(observer))
     .with_todos(todos.clone())
     .with_command_policy(cfg.commands)
+    .with_reasoning_effort(
+        cfg.reasoning_effort
+            .as_deref()
+            .and_then(harxes_core_domain::domain::value_objects::ReasoningEffort::parse),
+    )
     .with_hooks(cfg.hooks)
     .with_web(Arc::new(harxes_infra_web::ReqwestWeb::default()))
     .with_fallback_models(cfg.fallback_models.clone());

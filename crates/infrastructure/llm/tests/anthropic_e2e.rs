@@ -64,7 +64,7 @@ async fn non_stream_parses_tool_use_from_response() {
     let msgs = vec![Message::new(Role::User, "run pwd")];
 
     let resp = client
-        .generate(&pid, "claude-sonnet", &msgs, &bash_spec(), Some(0.0))
+        .generate(&pid, "claude-sonnet", &msgs, &bash_spec(), Some(0.0), None)
         .await
         .unwrap();
 
@@ -100,7 +100,7 @@ async fn stream_parses_tool_use_from_sse() {
     });
 
     let resp = client
-        .generate_stream(&pid, "claude-sonnet", &msgs, &bash_spec(), Some(0.0), sink)
+        .generate_stream(&pid, "claude-sonnet", &msgs, &bash_spec(), Some(0.0), None, sink)
         .await
         .unwrap();
 

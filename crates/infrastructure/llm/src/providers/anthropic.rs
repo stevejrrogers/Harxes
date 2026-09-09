@@ -1,6 +1,6 @@
 use async_trait::async_trait;
 use harxes_core_domain::domain::value_objects::{
-    Message, ProviderId, Role, ToolCall, ToolSpec,
+    Message, ProviderId, ReasoningEffort, Role, ToolCall, ToolSpec,
 };
 use harxes_core_domain::ports::{AgentResponse, LlmError, LlmPort, StreamSink};
 use serde::Serialize;
@@ -12,8 +12,20 @@ struct RequestBody<'a> {
     system: Option<serde_json::Value>,
     messages: serde_json::Value,
     temperature: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    thinking: Option<serde_json::Value>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     tools: Vec<serde_json::Value>,
+}
+
+/// Anthropic extended-thinking block for a reasoning-effort level.
+fn thinking_block(effort: Option<ReasoningEffort>) -> Option<serde_json::Value> {
+    effort.map(|e| {
+        serde_json::json!({
+            "type": "enabled",
+            "budget_tokens": e.anthropic_budget_tokens(),
+        })
+    })
 }
 
 #[derive(serde::Deserialize)]
@@ -187,6 +199,7 @@ impl LlmPort for AnthropicClient {
         messages: &[Message],
         tools: &[ToolSpec],
         temperature: Option<f64>,
+        reasoning_effort: Option<ReasoningEffort>,
     ) -> Result<AgentResponse, LlmError> {
         let body = RequestBody {
             model: model_id,
@@ -194,6 +207,7 @@ impl LlmPort for AnthropicClient {
             system: encode_system(messages),
             messages: encode_messages(messages),
             temperature,
+            thinking: thinking_block(reasoning_effort),
             tools: encode_tools(tools),
         };
 
@@ -276,12 +290,13 @@ impl LlmPort for AnthropicClient {
         messages: &[Message],
         tools: &[ToolSpec],
         temperature: Option<f64>,
+        reasoning_effort: Option<ReasoningEffort>,
         sink: StreamSink,
     ) -> Result<AgentResponse, LlmError> {
         use futures_util::StreamExt;
         use harxes_core_domain::ports::StreamEvent;
 
-        let body = serde_json::json!({
+        let mut body = serde_json::json!({
             "model": model_id,
             "max_tokens": DEFAULT_MAX_TOKENS,
             "stream": true,
@@ -290,6 +305,9 @@ impl LlmPort for AnthropicClient {
             "tools": encode_tools(tools),
             "temperature": temperature,
         });
+        if let Some(t) = thinking_block(reasoning_effort) {
+            body["thinking"] = t;
+        }
 
         let resp = match self
             .http

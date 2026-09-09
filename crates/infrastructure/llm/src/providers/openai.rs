@@ -196,6 +196,8 @@ struct RequestBody<'a> {
     messages: Vec<ApiMessage<'a>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     temperature: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    reasoning_effort: Option<&'static str>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     tools: Vec<ToolDef<'a>>,
 }
@@ -429,12 +431,14 @@ impl LlmPort for OpenAiClient {
         messages: &[Message],
         tools: &[harxes_core_domain::domain::value_objects::ToolSpec],
         temperature: Option<f64>,
+        reasoning_effort: Option<harxes_core_domain::domain::value_objects::ReasoningEffort>,
     ) -> Result<AgentResponse, LlmError> {
         let api_messages = messages.iter().map(to_api_message).collect();
         let body = RequestBody {
             model: model_id,
             messages: api_messages,
             temperature,
+            reasoning_effort: reasoning_effort.map(|e| e.as_str()),
             tools: build_tools(tools),
         };
         let req = self.authorize(self.http.post(self.url()).json(&body)).await?;
@@ -502,13 +506,14 @@ impl LlmPort for OpenAiClient {
         messages: &[Message],
         tools: &[harxes_core_domain::domain::value_objects::ToolSpec],
         temperature: Option<f64>,
+        reasoning_effort: Option<harxes_core_domain::domain::value_objects::ReasoningEffort>,
         sink: StreamSink,
     ) -> Result<AgentResponse, LlmError> {
         use futures_util::StreamExt;
         use harxes_core_domain::ports::StreamEvent;
 
         let api_messages = messages.iter().map(to_api_message).collect::<Vec<_>>();
-        let body = serde_json::json!({
+        let mut body = serde_json::json!({
             "model": model_id,
             "messages": api_messages,
             "temperature": temperature,
@@ -516,6 +521,9 @@ impl LlmPort for OpenAiClient {
             "stream_options": {"include_usage": true},
             "tools": build_tools(tools),
         });
+        if let Some(e) = reasoning_effort {
+            body["reasoning_effort"] = serde_json::json!(e.as_str());
+        }
 
         let req = self.authorize(self.http.post(self.url()).json(&body)).await?;
         let resp = match req.send().await {
@@ -670,7 +678,24 @@ mod vision_tests {
 
 #[cfg(test)]
 mod url_tests {
-    use super::{segment_reasoning, OpenAiClient};
+    use super::{segment_reasoning, OpenAiClient, RequestBody};
+
+    #[test]
+    fn request_body_includes_reasoning_effort() {
+        use harxes_core_domain::domain::value_objects::ReasoningEffort;
+        let body = RequestBody {
+            model: "m",
+            messages: vec![],
+            temperature: None,
+            reasoning_effort: Some(ReasoningEffort::Low).map(|e| e.as_str()),
+            tools: vec![],
+        };
+        let v = serde_json::to_value(&body).unwrap();
+        assert_eq!(v["reasoning_effort"], "low");
+        // Absent when None.
+        let body2 = RequestBody { model: "m", messages: vec![], temperature: None, reasoning_effort: None, tools: vec![] };
+        assert!(serde_json::to_value(&body2).unwrap().get("reasoning_effort").is_none());
+    }
 
     #[test]
     fn reasoning_segmentation_breaks_long_runs() {

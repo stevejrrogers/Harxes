@@ -2,6 +2,7 @@ mod context_window;
 mod message;
 mod model_id;
 mod permission;
+mod reasoning;
 mod provider_id;
 mod token_usage;
 mod todo;
@@ -13,6 +14,7 @@ pub use context_window::{
 };
 pub use message::{ImageData, Message, Role};
 pub use model_id::{InvalidModelId, ModelId};
+pub use reasoning::ReasoningEffort;
 pub use permission::{CommandPolicy, CommandVerdict, FsOp, PermissionPolicy};
 pub use provider_id::{InvalidProviderId, ProviderId};
 pub use token_usage::TokenUsage;
