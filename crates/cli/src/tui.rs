@@ -514,14 +514,25 @@ fn chat_pane(frame: &mut Frame, state: &mut AppState, area: Rect) {
             "  HARXES ✦",
             Style::new().fg(Color::Magenta).bold(),
         )]));
-        text.push_line(Line::from(vec![
-            Span::raw(shown.to_string()),
-            if state.spinner.is_multiple_of(2) {
-                Span::styled("▋", Style::new().fg(Color::Cyan))
-            } else {
-                Span::raw(" ")
-            },
-        ]));
+        // Render the revealed text the SAME way as a finalized reply: split on
+        // newlines into real Lines (a single Line with embedded '\n' misrenders
+        // and makes the height estimate bounce → the pane jitters). The blink
+        // cursor sits on the last line only, and toggles slowly so it doesn't
+        // flicker.
+        let blink = (state.spinner / 8).is_multiple_of(2);
+        let parts: Vec<&str> = shown.split('\n').collect();
+        let last = parts.len().saturating_sub(1);
+        for (i, part) in parts.iter().enumerate() {
+            let mut spans = markdown_spans(part);
+            if i == last {
+                spans.push(if blink {
+                    Span::styled("▋", Style::new().fg(Color::Cyan))
+                } else {
+                    Span::raw(" ")
+                });
+            }
+            text.push_line(Line::from(spans));
+        }
     }
 
     // Auto-scroll against the ACTUAL rendered text: measure each line's
@@ -1001,11 +1012,11 @@ pub fn run(
         if !state.typing_text.is_empty() && state.typing_shown < state.typing_text.len() {
             let target = state.typing_text.len();
             let lag = target - state.typing_shown;
-            let step = if state.streaming_turn && lag > 120 {
-                lag - 80 // snap near the head of the stream
-            } else {
-                (target / 12).max(24)
-            };
+            // Reveal at a rate proportional to how far behind we are, capped so
+            // it never jumps a huge chunk in one frame (which reads as a stutter
+            // rather than smooth typing). Catches up on long replies, stays
+            // smooth on short ones.
+            let step = (lag / 4).clamp(24, 200);
             state.typing_shown = (state.typing_shown + step).min(target);
         } else if !state.typing_text.is_empty() && state.typing_shown >= state.typing_text.len() {
             // done revealing: finalize into a real Agent line.
@@ -1416,6 +1427,37 @@ mod tests {
             apply_edit_key(&mut st, KeyCode::Right);
         }
         assert_eq!(st.cursor_ix, st.input.len());
+    }
+
+    #[test]
+    fn streaming_reveal_renders_multiline_not_one_blob() {
+        // A multi-line reply mid-reveal must render as separate rows (the old
+        // single-Line-with-embedded-newlines path misrendered and jittered).
+        let mut st = AppState::new("p", "m");
+        st.typing_text = "first line here\nsecond line here\nthird line here".to_string();
+        st.typing_shown = st.typing_text.len();
+        st.streaming_turn = true;
+        let backend = TestBackend::new(100, 24);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|f| draw(f, &mut st)).unwrap();
+        let buf = terminal.backend().buffer();
+        // Collect the row index of each distinct line.
+        let mut rows = std::collections::HashMap::new();
+        for y in 0..buf.area.height {
+            let mut row = String::new();
+            for x in 0..buf.area.width {
+                row.push_str(buf[(x, y)].symbol());
+            }
+            for key in ["first line here", "second line here", "third line here"] {
+                if row.contains(key) {
+                    rows.insert(key, y);
+                }
+            }
+        }
+        assert_eq!(rows.len(), 3, "all three lines must render");
+        // They must be on three DIFFERENT rows (not collapsed into one blob).
+        let ys: std::collections::HashSet<_> = rows.values().collect();
+        assert_eq!(ys.len(), 3, "lines must occupy distinct rows: {rows:?}");
     }
 
     #[test]
