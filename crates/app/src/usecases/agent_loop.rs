@@ -229,6 +229,7 @@ impl AgentLoop {
             }
             return block_reason;
         }
+        let started = std::time::Instant::now();
         let result = match ToolId::parse(call.name.as_str()) {
             Some(tool) => match parse_args(tool, &call.arguments) {
                 ParsedArgs::Bash { command } => self.run_bash(&command).await,
@@ -280,7 +281,14 @@ impl AgentLoop {
         };
         let result = self.run_post_hooks(call, result).await;
         if let Some(obs) = &self.observer {
-            obs.on_tool_result(call.name.as_str(), &Self::preview(result.as_str(), 100));
+            let duration_ms = started.elapsed().as_millis() as u64;
+            let ok = Self::tool_succeeded(&result);
+            obs.on_tool_end(
+                call.name.as_str(),
+                &Self::preview(result.as_str(), 100),
+                duration_ms,
+                ok,
+            );
         }
         result
     }
@@ -406,6 +414,32 @@ impl AgentLoop {
             }
         }
         result
+    }
+
+    /// Heuristic success flag for a tool result string, so a UI can color the
+    /// outcome without parsing. Bash uses its exit code; other tools fail when
+    /// the result opens with a known error prefix.
+    fn tool_succeeded(result: &str) -> bool {
+        let t = result.trim_start();
+        if let Some(rest) = t.strip_prefix("exit=") {
+            return rest.split_whitespace().next() == Some("0");
+        }
+        const ERR_PREFIXES: [&str; 12] = [
+            "error",
+            "read error",
+            "write error",
+            "edit error",
+            "grep error",
+            "list error",
+            "skill error",
+            "fetch error",
+            "search error",
+            "permission denied",
+            "unknown tool",
+            "blocked by pre_tool hook",
+        ];
+        let lower = t.to_lowercase();
+        !ERR_PREFIXES.iter().any(|p| lower.starts_with(p))
     }
 
     fn preview(raw: &str, max: usize) -> String {
@@ -1148,11 +1182,17 @@ impl AgentLoop {
             total_tokens += resp.usage.total_tokens;
             total_input += resp.usage.input_tokens;
             total_output += resp.usage.output_tokens;
+            iterations += 1;
+            // Emit iteration progress so a UI can show how close the run is to
+            // the iteration/token guardrails (a run that dies at the cap now
+            // has a visible trail leading up to it).
+            if let Some(obs) = &self.observer {
+                obs.on_iteration(iterations, total_input, total_output);
+            }
             if total_tokens > limits.max_total_tokens {
                 truncated = true;
                 break;
             }
-            iterations += 1;
 
             if resp.tool_calls.is_empty() {
                 self.persist_session(&transcript);
@@ -1298,11 +1338,19 @@ impl harxes_core_domain::ports::ToolObserver for NestedObserver {
         self.inner
             .on_tool_result(&AgentLoop::nested_prefix(self.depth, name), result_preview);
     }
+    fn on_tool_end(&self, name: &str, result_preview: &str, duration_ms: u64, ok: bool) {
+        self.inner.on_tool_end(
+            &AgentLoop::nested_prefix(self.depth, name),
+            result_preview,
+            duration_ms,
+            ok,
+        );
+    }
     fn on_retry(&self, wait_secs: u64) {
         self.inner.on_retry(wait_secs);
     }
-    // on_stream_delta: default no-op — sub-agent text stays out of the
-    // parent's live stream.
+    // on_iteration / on_stream_delta: not forwarded — a sub-agent's inner
+    // iterations and text stay out of the parent's progress/stream.
 }
 
 #[async_trait::async_trait]

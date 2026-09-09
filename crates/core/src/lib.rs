@@ -123,16 +123,35 @@ pub struct RunRequest {
 }
 
 /// A live event emitted while a run executes. Consumed off the event channel.
+///
+/// `#[non_exhaustive]`: new variants may be added in a minor release, so match
+/// with a trailing `_ => {}` arm. `Text`/`Reasoning` are streaming DELTAS
+/// (per-token chunks) — coalesce them consumer-side.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[non_exhaustive]
 pub enum RunEvent {
-    /// A chunk of streamed assistant text.
+    /// A chunk of streamed assistant text (a delta, not the whole message).
     Text(String),
-    /// A chunk of streamed hidden reasoning ("thinking").
+    /// A chunk of streamed hidden reasoning ("thinking") — a delta.
     Reasoning(String),
     /// A tool is about to run. `summary` is a clean one-line label.
     ToolStart { name: String, summary: String },
-    /// A tool finished; `summary` previews its result.
-    ToolEnd { name: String, summary: String },
+    /// A tool finished. `duration_ms` is how long it ran; `ok` is a success
+    /// flag (Bash exit==0, or no error prefix) so the UI can color it without
+    /// parsing `summary`.
+    ToolEnd {
+        name: String,
+        summary: String,
+        duration_ms: u64,
+        ok: bool,
+    },
+    /// One agent-loop iteration completed. Carries cumulative token usage so a
+    /// UI can show progress toward the iteration/token guardrails.
+    Iteration {
+        n: usize,
+        input_tokens: u64,
+        output_tokens: u64,
+    },
     /// A transient failure triggered a backoff before retrying.
     Retry { wait_secs: u64 },
 }
@@ -255,9 +274,27 @@ impl ToolObserver for EventObserver {
         });
     }
     fn on_tool_result(&self, name: &str, result_preview: &str) {
+        // Fallback path (rich telemetry unavailable): emit with neutral values.
         let _ = self.tx.send(RunEvent::ToolEnd {
             name: name.to_string(),
             summary: result_preview.to_string(),
+            duration_ms: 0,
+            ok: true,
+        });
+    }
+    fn on_tool_end(&self, name: &str, result_preview: &str, duration_ms: u64, ok: bool) {
+        let _ = self.tx.send(RunEvent::ToolEnd {
+            name: name.to_string(),
+            summary: result_preview.to_string(),
+            duration_ms,
+            ok,
+        });
+    }
+    fn on_iteration(&self, n: usize, input_tokens: u64, output_tokens: u64) {
+        let _ = self.tx.send(RunEvent::Iteration {
+            n,
+            input_tokens,
+            output_tokens,
         });
     }
     fn on_retry(&self, wait_secs: u64) {
@@ -499,6 +536,69 @@ mod tests {
             command_policy: CommandPolicy::default(),
             permission: PermissionMode::AllowUnlessDenied,
         }
+    }
+
+    #[tokio::test]
+    async fn events_carry_iteration_and_tool_telemetry() {
+        // LLM: turn 1 runs a Bash echo, turn 2 stops. We collect events.
+        struct ToolThenStop(std::sync::atomic::AtomicUsize);
+        #[async_trait::async_trait]
+        impl LlmPort for ToolThenStop {
+            async fn generate(
+                &self,
+                _p: &ProviderId,
+                _m: &str,
+                _msgs: &[Message],
+                _t: &[ToolSpec],
+                _temp: Option<f64>,
+            ) -> Result<AgentResponse, LlmError> {
+                use harxes_core_domain::domain::value_objects::{ToolCall, TokenUsage};
+                let n = self.0.fetch_add(1, Ordering::SeqCst);
+                if n == 0 {
+                    Ok(AgentResponse {
+                        content: String::new(),
+                        usage: TokenUsage::new(100, 20),
+                        tool_calls: vec![ToolCall {
+                            id: "1".into(),
+                            name: "Bash".into(),
+                            arguments: r#"{"command":"echo hi"}"#.into(),
+                        }],
+                    })
+                } else {
+                    Ok(AgentResponse::text("done", TokenUsage::new(50, 10)))
+                }
+            }
+        }
+        let e = engine_with(
+            Arc::new(ToolThenStop(std::sync::atomic::AtomicUsize::new(0))),
+            Arc::new(harxes_infra_shell::TokioCommandShell::new(10)),
+        );
+        let (mut events, driver) = e.run(RunRequest { prompt: "go".into(), ..Default::default() }).split();
+        let collected = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let c2 = collected.clone();
+        let pump = tokio::spawn(async move {
+            while let Some(ev) = events.recv().await {
+                c2.lock().unwrap().push(ev);
+            }
+        });
+        let out = driver.await.unwrap();
+        let _ = pump.await;
+        assert_eq!(out.final_text, "done");
+        let evs = collected.lock().unwrap();
+        // Iteration events with cumulative tokens.
+        let iters: Vec<_> = evs.iter().filter_map(|e| match e {
+            RunEvent::Iteration { n, input_tokens, output_tokens } => Some((*n, *input_tokens, *output_tokens)),
+            _ => None,
+        }).collect();
+        assert!(iters.len() >= 2, "expected >=2 iteration events, got {iters:?}");
+        assert_eq!(iters[0], (1, 100, 20));
+        assert_eq!(iters[1], (2, 150, 30)); // cumulative
+        // ToolEnd carries ok + a duration.
+        let tool_end = evs.iter().find_map(|e| match e {
+            RunEvent::ToolEnd { name, ok, .. } => Some((name.clone(), *ok)),
+            _ => None,
+        });
+        assert_eq!(tool_end, Some(("Bash".to_string(), true)));
     }
 
     #[tokio::test]
