@@ -252,6 +252,9 @@ pub fn assemble(
             .as_deref()
             .and_then(harxes_core_domain::domain::value_objects::ReasoningEffort::parse),
     )
+    .with_rate_limit_patience(std::time::Duration::from_secs(
+        cfg.limits.rate_limit_patience_secs.unwrap_or(90),
+    ))
     .with_hooks(cfg.hooks)
     .with_web(Arc::new(harxes_infra_web::ReqwestWeb::default()))
     .with_fallback_models(cfg.fallback_models.clone());

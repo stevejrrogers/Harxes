@@ -76,6 +76,11 @@ pub struct EngineConfig {
     /// Default reasoning effort (Low/Medium/High). `None` = provider default.
     /// Overridable per-run via [`RunRequest::reasoning_effort`].
     pub reasoning_effort: Option<ReasoningEffort>,
+    /// How long to wait out a rate-limited (429) provider before returning
+    /// [`EngineError::ProviderUnavailable`]. `None` = default (90s). The
+    /// provider is alive when throttled, so waiting lets parallel runs queue
+    /// instead of failing over.
+    pub rate_limit_patience: Option<Duration>,
     /// Host-provided confined shell (sandbox passthrough). Defaults to a plain
     /// process-group shell with kill-on-drop when `None`.
     pub shell: Option<Arc<dyn ShellPort>>,
@@ -96,6 +101,7 @@ impl EngineConfig {
             command_policy: CommandPolicy::default(),
             permission: PermissionMode::default(),
             reasoning_effort: None,
+            rate_limit_patience: None,
             shell: None,
             fs: None,
         }
@@ -385,6 +391,7 @@ pub struct HarxesEngine {
     command_policy: CommandPolicy,
     permission: PermissionMode,
     reasoning_effort: Option<ReasoningEffort>,
+    rate_limit_patience: Duration,
 }
 
 impl HarxesEngine {
@@ -445,6 +452,9 @@ impl HarxesEngine {
             command_policy: config.command_policy,
             permission: config.permission,
             reasoning_effort: config.reasoning_effort,
+            rate_limit_patience: config
+                .rate_limit_patience
+                .unwrap_or_else(|| Duration::from_secs(90)),
         })
     }
 
@@ -472,7 +482,9 @@ impl HarxesEngine {
             agent = agent.with_working_dir(wd.to_string_lossy().to_string());
         }
         let effort = req.reasoning_effort.or(self.reasoning_effort);
-        agent = agent.with_reasoning_effort(effort);
+        agent = agent
+            .with_reasoning_effort(effort)
+            .with_rate_limit_patience(self.rate_limit_patience);
 
         let provider_id = self.provider_id.clone();
         let model = req.model.clone().unwrap_or_else(|| self.model.clone());
@@ -566,6 +578,7 @@ mod tests {
             command_policy: CommandPolicy::default(),
             permission: PermissionMode::AllowUnlessDenied,
             reasoning_effort: None,
+            rate_limit_patience: Duration::from_secs(2),
         }
     }
 
@@ -695,6 +708,7 @@ mod tests {
             command_policy: CommandPolicy::default(),
             permission: PermissionMode::AllowUnlessDenied,
             reasoning_effort: None,
+            rate_limit_patience: Duration::from_secs(2),
         };
         let out = e
             .run(RunRequest {

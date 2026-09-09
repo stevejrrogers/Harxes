@@ -454,12 +454,15 @@ impl LlmPort for OpenAiClient {
             Ok(r) => r,
             Err(e) => return Err(LlmError::Request(format!("transport error : {e}"))),
         };
-        if resp.status().is_server_error()
-            || resp.status() == reqwest::StatusCode::TOO_MANY_REQUESTS
-        {
+        if resp.status() == reqwest::StatusCode::TOO_MANY_REQUESTS {
             return Err(LlmError::RateLimited {
                 retry_after: retry_after_secs(&resp),
             });
+        }
+        if resp.status().is_server_error() {
+            // 5xx: transient but the provider may be down — fail fast so the
+            // caller can fail over, rather than waiting out a rate-limit budget.
+            return Err(LlmError::Request(format!("HTTP {}", resp.status())));
         }
         if resp.status() == reqwest::StatusCode::UNAUTHORIZED
             || resp.status() == reqwest::StatusCode::FORBIDDEN
@@ -543,10 +546,13 @@ impl LlmPort for OpenAiClient {
             Ok(r) => r,
             Err(e) => return Err(LlmError::Request(format!("transport error : {e}"))),
         };
-        if resp.status().is_server_error()
-            || resp.status() == reqwest::StatusCode::TOO_MANY_REQUESTS
-        {
-            return Err(LlmError::RateLimited { retry_after: None });
+        if resp.status() == reqwest::StatusCode::TOO_MANY_REQUESTS {
+            return Err(LlmError::RateLimited {
+                retry_after: retry_after_secs(&resp),
+            });
+        }
+        if resp.status().is_server_error() {
+            return Err(LlmError::Request(format!("HTTP {}", resp.status())));
         }
         if resp.status().is_client_error() {
             return Err(LlmError::Request(format!("HTTP {}", resp.status())));

@@ -75,6 +75,8 @@ pub struct AgentLoop {
     working_dir: String,
     /// Reasoning-effort hint sent to the provider (None = provider default).
     reasoning_effort: Option<harxes_core_domain::domain::value_objects::ReasoningEffort>,
+    /// How long to keep retrying a rate-limited (429) provider before giving up.
+    rate_limit_patience: std::time::Duration,
 }
 
 impl AgentLoop {
@@ -101,7 +103,14 @@ impl AgentLoop {
             fallback_models: Vec::new(),
             working_dir: ".".to_string(),
             reasoning_effort: None,
+            rate_limit_patience: std::time::Duration::from_secs(90),
         }
+    }
+
+    /// Set how long to wait out rate limits (429) before failing. Default 90s.
+    pub fn with_rate_limit_patience(mut self, patience: std::time::Duration) -> Self {
+        self.rate_limit_patience = patience;
+        self
     }
 
     /// Set the reasoning-effort hint for LLM calls.
@@ -1022,6 +1031,7 @@ impl AgentLoop {
             fallback_models: self.fallback_models.clone(),
             working_dir: self.working_dir.clone(),
             reasoning_effort: self.reasoning_effort,
+            rate_limit_patience: self.rate_limit_patience,
         };
         let limits = LoopLimits {
             max_iterations: 15,
@@ -1157,6 +1167,9 @@ impl AgentLoop {
         };
 
         let mut attempt = 0usize;
+        // Cumulative time spent waiting out rate limits this call (budgeted by
+        // `rate_limit_patience`).
+        let mut rl_waited_ms: u64 = 0;
         loop {
             let result = match &sink {
                 Some(s) => self
@@ -1186,40 +1199,43 @@ impl AgentLoop {
             };
             match result {
                 Ok(r) => return Ok(r),
-                Err(e) => {
-                    // Classify the error as retryable (rate limit / transient
-                    // 5xx-class request failure) or terminal.
-                    // Rate limits deserve real patience: quota windows are
-                    // usually tens of seconds, so give them more attempts and
-                    // longer waits than generic transient failures.
-                    let plan = match &e {
-                        LE::RateLimited { retry_after } => Some((
-                            max_retries.max(6),
-                            (2000u64 << attempt.min(4)).min(30_000),
-                            *retry_after,
-                        )),
-                        LE::Request(_) => Some((
-                            max_retries,
-                            250u64.saturating_mul(1 << attempt.min(5)),
-                            None,
-                        )),
-                        _ => None,
-                    };
-                    match plan {
-                        Some((cap, base, ra)) if attempt < cap => {
-                            let wait = match ra {
-                                Some(secs) => base.max(secs * 1000),
-                                None => base,
-                            };
-                            if let Some(obs) = &self.observer {
-                                obs.on_retry(wait / 1000);
-                            }
-                            tokio::time::sleep(std::time::Duration::from_millis(wait)).await;
-                            attempt += 1;
+                Err(e) => match &e {
+                    // Rate limit: the provider is ALIVE, just throttled — worth
+                    // waiting out. Keep retrying with exponential backoff
+                    // (honoring Retry-After) until the cumulative wait reaches
+                    // the patience budget, so parallel workers queue instead of
+                    // failing over to a weaker model.
+                    LE::RateLimited { retry_after } => {
+                        let patience_ms = self.rate_limit_patience.as_millis() as u64;
+                        if rl_waited_ms >= patience_ms {
+                            return Err(e);
                         }
-                        _ => return Err(e),
+                        let backoff = (2000u64 << attempt.min(4)).min(30_000);
+                        let wait = retry_after
+                            .map(|s| (s * 1000).max(backoff))
+                            .unwrap_or(backoff)
+                            // Don't overshoot the remaining budget by much.
+                            .min((patience_ms - rl_waited_ms).max(1000));
+                        if let Some(obs) = &self.observer {
+                            obs.on_retry(wait.div_ceil(1000));
+                        }
+                        tokio::time::sleep(std::time::Duration::from_millis(wait)).await;
+                        rl_waited_ms += wait;
+                        attempt += 1;
                     }
-                }
+                    // 5xx / transport: transient but the provider may be down —
+                    // a few short retries, then fail fast so the caller fails
+                    // over rather than burning the rate-limit budget.
+                    LE::Request(_) if attempt < max_retries => {
+                        let wait = 250u64.saturating_mul(1 << attempt.min(5));
+                        if let Some(obs) = &self.observer {
+                            obs.on_retry(wait.div_ceil(1000));
+                        }
+                        tokio::time::sleep(std::time::Duration::from_millis(wait)).await;
+                        attempt += 1;
+                    }
+                    _ => return Err(e),
+                },
             }
         }
     }
@@ -2266,6 +2282,41 @@ mod tests {
         assert_eq!(res.outcome.iterations, 1);
         // transcript should include system + first user + second user + assistant reply
         assert!(res.transcript.iter().any(|m| m.content == "second"));
+    }
+
+    #[tokio::test]
+    async fn rate_limit_waits_within_patience_then_fails() {
+        use harxes_core_domain::ports::LlmError;
+        // Always 429: with a tiny patience budget the loop should give up
+        // quickly (a few sub-second waits), returning RateLimited.
+        struct Limited;
+        #[async_trait::async_trait]
+        impl LlmPort for Limited {
+            async fn generate(
+                &self,
+                _p: &ProviderId,
+                _m: &str,
+                _msgs: &[Message],
+                _t: &[ToolSpec],
+                _temp: Option<f64>,
+                _re: Option<harxes_core_domain::domain::value_objects::ReasoningEffort>,
+            ) -> Result<AgentResponse, LlmError> {
+                Err(LlmError::RateLimited { retry_after: None })
+            }
+        }
+        let a = AgentLoop::new(Arc::new(Limited), Arc::new(FakeShell), Arc::new(FakeFs))
+            .with_rate_limit_patience(std::time::Duration::from_millis(1500));
+        let pid = ProviderId::new("x").unwrap();
+        let start = std::time::Instant::now();
+        let err = a
+            .run(&pid, "m", "sys", "hi", &LoopLimits::default())
+            .await
+            .unwrap_err();
+        assert!(matches!(err, LlmError::RateLimited { .. }));
+        // It must have actually waited (budget ~1.5s) but not hung forever.
+        let elapsed = start.elapsed();
+        assert!(elapsed >= std::time::Duration::from_millis(1000), "should wait: {elapsed:?}");
+        assert!(elapsed < std::time::Duration::from_secs(10), "should not hang: {elapsed:?}");
     }
 
     #[tokio::test]

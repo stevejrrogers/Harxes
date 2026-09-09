@@ -169,6 +169,14 @@ pub struct AnthropicClient {
     api_key: String,
 }
 
+/// Parse the `Retry-After` header (seconds) for backoff.
+fn retry_after_secs(resp: &reqwest::Response) -> Option<u64> {
+    resp.headers()
+        .get(reqwest::header::RETRY_AFTER)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|s| s.trim().parse::<u64>().ok())
+}
+
 impl AnthropicClient {
     pub fn new(base_url: impl Into<String>, api_key: impl Into<String>) -> Self {
         Self {
@@ -226,10 +234,13 @@ impl LlmPort for AnthropicClient {
             Err(e) => return Err(LlmError::Request(format!("transport error: {e}"))),
         };
 
-        if resp.status().is_server_error()
-            || resp.status() == reqwest::StatusCode::TOO_MANY_REQUESTS
-        {
-            return Err(LlmError::RateLimited { retry_after: None });
+        if resp.status() == reqwest::StatusCode::TOO_MANY_REQUESTS {
+            return Err(LlmError::RateLimited {
+                retry_after: retry_after_secs(&resp),
+            });
+        }
+        if resp.status().is_server_error() {
+            return Err(LlmError::Request(format!("HTTP {}", resp.status())));
         }
         if resp.status() == reqwest::StatusCode::UNAUTHORIZED
             || resp.status() == reqwest::StatusCode::FORBIDDEN
@@ -323,10 +334,13 @@ impl LlmPort for AnthropicClient {
             Err(e) => return Err(LlmError::Request(format!("transport error: {e}"))),
         };
 
-        if resp.status().is_server_error()
-            || resp.status() == reqwest::StatusCode::TOO_MANY_REQUESTS
-        {
-            return Err(LlmError::RateLimited { retry_after: None });
+        if resp.status() == reqwest::StatusCode::TOO_MANY_REQUESTS {
+            return Err(LlmError::RateLimited {
+                retry_after: retry_after_secs(&resp),
+            });
+        }
+        if resp.status().is_server_error() {
+            return Err(LlmError::Request(format!("HTTP {}", resp.status())));
         }
         if resp.status().is_client_error() {
             return Err(LlmError::Request(format!("HTTP {}", resp.status())));
