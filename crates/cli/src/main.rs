@@ -295,6 +295,7 @@ Commands
   /remember <x>  save a note to project memory (.harxes/agents/NOTES.md)
   /init          generate a HARXES.md project guide
   /mcp           list connected MCP servers and tools
+  /skills        list available skills
   /theme <d|l>   dark or light
   /export <file> write the transcript to <file>.md
   /exit          quit  (Ctrl-C cancels a running turn)
@@ -515,6 +516,26 @@ fn run_repl(
                     }
                     out.push_str(&format!("\nestimated cost: ${total:.4}"));
                     st.lines.push(tui::ChatLine::Agent(out));
+                    return;
+                }
+                "/skills" => {
+                    let root = std::path::PathBuf::from(".");
+                    let skills = harxes_infra_fs::skills::discover(&root);
+                    if skills.is_empty() {
+                        st.lines.push(tui::ChatLine::Tool(
+                            "no skills — add .harxes/skills/<name>/SKILL.md (or .claude/skills/)".into(),
+                        ));
+                    } else {
+                        for sk in &skills {
+                            st.lines.push(tui::ChatLine::Tool(format!(
+                                "· {}  {}",
+                                sk.name, sk.description
+                            )));
+                        }
+                        st.lines.push(tui::ChatLine::Tool(
+                            "the agent loads these on its own via the Skill tool".into(),
+                        ));
+                    }
                     return;
                 }
                 "/mcp" => {

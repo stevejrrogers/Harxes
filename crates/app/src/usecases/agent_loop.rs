@@ -236,6 +236,7 @@ impl AgentLoop {
                     self.glob(&pattern, max_depth).await
                 }
                 ParsedArgs::List { path } => Self::list_dir(&path),
+                ParsedArgs::Skill { name } => Self::load_skill(&name),
                 ParsedArgs::Delegate { task, context } => {
                     self.delegate_subtask(provider_id, model_id, &task, context.as_deref())
                         .await
@@ -523,6 +524,30 @@ impl AgentLoop {
             total,
             body
         )
+    }
+
+    /// Load a skill's full instructions by name from `.harxes/skills/<name>/`
+    /// or `.claude/skills/<name>/SKILL.md` (frontmatter stripped).
+    fn load_skill(name: &str) -> String {
+        let want = name.trim();
+        if want.is_empty() {
+            return "skill error: no skill name given".to_string();
+        }
+        for root in [".harxes/skills", ".claude/skills"] {
+            let path = format!("{root}/{want}/SKILL.md");
+            if let Ok(content) = std::fs::read_to_string(&path) {
+                // Strip a leading `---` frontmatter block if present.
+                let body = match content.trim_start().strip_prefix("---") {
+                    Some(rest) => match rest.find("\n---") {
+                        Some(end) => rest[end + 4..].trim_start_matches(['\r', '\n']).to_string(),
+                        None => content.clone(),
+                    },
+                    None => content.clone(),
+                };
+                return format!("[skill: {want}]\n{}", body.trim());
+            }
+        }
+        format!("skill error: no skill named '{want}' (check the Available skills list)")
     }
 
     /// List a directory's entries (dirs first, then files; dirs get a trailing

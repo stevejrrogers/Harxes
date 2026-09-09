@@ -19,6 +19,7 @@ harxes
 - **Web search & fetch** — built-in `Search` (key-free, DuckDuckGo) and `Fetch` (HTML reduced to text, size-capped) tools.
 - **Vision input** — mention an image file path in your prompt and it is attached to the message (Anthropic image blocks / OpenAI data-URI parts; needs a vision-capable model).
 - **Failover & caching** — config `fallback_models` switch models on terminal errors; Anthropic requests carry prompt-cache breakpoints on system + tools.
+- **Skills** — drop a `.harxes/skills/<name>/SKILL.md` (or `.claude/skills/`, cross-tool) with `name`/`description` frontmatter; the agent sees the one-line list and loads a skill's full instructions on demand via the `Skill` tool. `/skills` lists them.
 - **MCP client** — stdio MCP servers from config appear as `mcp__server__tool`; `/mcp` shows status.
 - **Hooks** — shell commands around tool calls: `pre_tool` can veto (exit 2), `post_tool` feeds output back to the model.
 - **Permissions** — dangerous commands prompt y/n in the TUI; config `commands.allow`/`deny` skip or hard-block by pattern; file edits show a colored diff before applying.

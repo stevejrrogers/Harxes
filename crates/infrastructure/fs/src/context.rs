@@ -118,7 +118,17 @@ impl ContextStore {
         if !notes.trim().is_empty() {
             out.push_str("# Workspace memory\n");
             out.push_str(notes.trim());
-            out.push('\n');
+            out.push_str("\n\n");
+        }
+        // Advertise on-demand skills by name+description; the model loads a
+        // skill's full instructions with the `Skill` tool when it applies.
+        let project_root = self.root.parent().unwrap_or(&self.root);
+        let skills = crate::skills::discover(project_root);
+        if !skills.is_empty() {
+            out.push_str("# Available skills (load with the Skill tool when relevant)\n");
+            for s in &skills {
+                out.push_str(&format!("- {}: {}\n", s.name, s.description));
+            }
         }
         out.trim_end().to_string()
     }

@@ -19,6 +19,7 @@ pub enum ToolId {
     Fetch,
     Search,
     List,
+    Skill,
 }
 
 impl ToolId {
@@ -35,6 +36,7 @@ impl ToolId {
             ToolId::Fetch => "Fetch",
             ToolId::Search => "Search",
             ToolId::List => "List",
+            ToolId::Skill => "Skill",
         }
     }
     pub fn parse(name: &str) -> Option<ToolId> {
@@ -50,6 +52,7 @@ impl ToolId {
             "Fetch" | "fetch" | "WebFetch" | "webfetch" => Some(ToolId::Fetch),
             "Search" | "search" | "WebSearch" | "websearch" => Some(ToolId::Search),
             "List" | "list" | "LS" | "ls" => Some(ToolId::List),
+            "Skill" | "skill" => Some(ToolId::Skill),
             _ => None,
         }
     }
@@ -69,6 +72,7 @@ pub enum ParsedArgs {
     Fetch { url: String },
     Search { query: String },
     List { path: String },
+    Skill { name: String },
 }
 
 /// The full set of tool specifications offered to the model.
@@ -131,6 +135,11 @@ pub fn all_tool_specs() -> Vec<ToolSpec> {
                     "properties": { "path": { "type": "string", "description": "Directory to list (default '.')" } },
                 })
             },
+        ),
+        ToolSpec::with_schema(
+            "Skill",
+            "Load the full instructions for one of the available skills by name (see the 'Available skills' list). Do this the moment a task matches a skill, before starting the work, then follow the returned instructions.",
+            obj_schema(vec![("name", "string")]),
         ),
         ToolSpec::with_schema(
             "Delegate",
@@ -221,6 +230,7 @@ pub fn tool_summary(name: &str, raw: &str) -> String {
         }),
         Some(ToolId::Glob) => field("pattern"),
         Some(ToolId::List) => field("path"),
+        Some(ToolId::Skill) => field("name"),
         Some(ToolId::Fetch) => field("url"),
         Some(ToolId::Search) => field("query"),
         Some(ToolId::Delegate) => field("task"),
@@ -368,6 +378,15 @@ pub fn parse_args(tool: ToolId, raw: &str) -> ParsedArgs {
                         .to_string();
                     return ParsedArgs::List { path };
                 }
+                ToolId::Skill => {
+                    let name = obj
+                        .get("name")
+                        .and_then(|x| x.as_str())
+                        .unwrap_or(raw)
+                        .trim()
+                        .to_string();
+                    return ParsedArgs::Skill { name };
+                }
                 ToolId::Todo => {
                     let action = obj
                         .get("action")
@@ -456,6 +475,9 @@ pub fn parse_args(tool: ToolId, raw: &str) -> ParsedArgs {
                 let t = raw.trim();
                 if t.is_empty() { ".".to_string() } else { t.to_string() }
             },
+        },
+        ToolId::Skill => ParsedArgs::Skill {
+            name: raw.trim().to_string(),
         },
         ToolId::Todo => ParsedArgs::Todo {
             action: TodoAction::List,
