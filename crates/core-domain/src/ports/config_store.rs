@@ -54,6 +54,8 @@ pub struct LimitsConfig {
     pub context_window_tokens: Option<u64>,
     /// Seconds to wait out a rate-limited (429) provider before failing.
     pub rate_limit_patience_secs: Option<u64>,
+    /// Distinct recent tool outputs kept verbatim before aging (default 8).
+    pub aging_keep_recent: Option<usize>,
 }
 
 /// One lifecycle hook: a shell command run around tool execution. `matcher`

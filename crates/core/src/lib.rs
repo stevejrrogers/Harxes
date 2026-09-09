@@ -81,6 +81,10 @@ pub struct EngineConfig {
     /// provider is alive when throttled, so waiting lets parallel runs queue
     /// instead of failing over.
     pub rate_limit_patience: Option<Duration>,
+    /// How many DISTINCT recent tool outputs to keep verbatim before aging the
+    /// rest to stubs. `None` = default (8). Raise it (8-10) for agents that
+    /// juggle several hot files; a re-read file counts as one slot.
+    pub aging_keep_recent: Option<usize>,
     /// Host-provided confined shell (sandbox passthrough). Defaults to a plain
     /// process-group shell with kill-on-drop when `None`.
     pub shell: Option<Arc<dyn ShellPort>>,
@@ -102,6 +106,7 @@ impl EngineConfig {
             permission: PermissionMode::default(),
             reasoning_effort: None,
             rate_limit_patience: None,
+            aging_keep_recent: None,
             shell: None,
             fs: None,
         }
@@ -392,6 +397,7 @@ pub struct HarxesEngine {
     permission: PermissionMode,
     reasoning_effort: Option<ReasoningEffort>,
     rate_limit_patience: Duration,
+    aging_keep_recent: usize,
 }
 
 impl HarxesEngine {
@@ -455,6 +461,7 @@ impl HarxesEngine {
             rate_limit_patience: config
                 .rate_limit_patience
                 .unwrap_or_else(|| Duration::from_secs(90)),
+            aging_keep_recent: config.aging_keep_recent.unwrap_or(8),
         })
     }
 
@@ -484,7 +491,8 @@ impl HarxesEngine {
         let effort = req.reasoning_effort.or(self.reasoning_effort);
         agent = agent
             .with_reasoning_effort(effort)
-            .with_rate_limit_patience(self.rate_limit_patience);
+            .with_rate_limit_patience(self.rate_limit_patience)
+            .with_aging_keep_recent(self.aging_keep_recent);
 
         let provider_id = self.provider_id.clone();
         let model = req.model.clone().unwrap_or_else(|| self.model.clone());
@@ -579,6 +587,7 @@ mod tests {
             permission: PermissionMode::AllowUnlessDenied,
             reasoning_effort: None,
             rate_limit_patience: Duration::from_secs(2),
+            aging_keep_recent: 8,
         }
     }
 
@@ -709,6 +718,7 @@ mod tests {
             permission: PermissionMode::AllowUnlessDenied,
             reasoning_effort: None,
             rate_limit_patience: Duration::from_secs(2),
+            aging_keep_recent: 8,
         };
         let out = e
             .run(RunRequest {

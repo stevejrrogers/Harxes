@@ -77,6 +77,10 @@ pub struct AgentLoop {
     reasoning_effort: Option<harxes_core_domain::domain::value_objects::ReasoningEffort>,
     /// How long to keep retrying a rate-limited (429) provider before giving up.
     rate_limit_patience: std::time::Duration,
+    /// How many DISTINCT recent tool results to keep verbatim before aging the
+    /// rest into stubs (counts distinct tool+args, so a re-read hot file uses
+    /// one slot). Default 8.
+    aging_keep_recent: usize,
 }
 
 impl AgentLoop {
@@ -104,7 +108,14 @@ impl AgentLoop {
             working_dir: ".".to_string(),
             reasoning_effort: None,
             rate_limit_patience: std::time::Duration::from_secs(90),
+            aging_keep_recent: 8,
         }
+    }
+
+    /// Set how many distinct recent tool outputs to keep verbatim (default 8).
+    pub fn with_aging_keep_recent(mut self, keep: usize) -> Self {
+        self.aging_keep_recent = keep.max(1);
+        self
     }
 
     /// Set how long to wait out rate limits (429) before failing. Default 90s.
@@ -445,23 +456,53 @@ impl AgentLoop {
     /// already-stubbed results are left alone.
     fn age_tool_outputs(transcript: &mut [Message], keep_recent: usize) {
         const STUB_NOTE: &str = "\n[… output elided to save context — re-run the tool or Read the file if you still need it]";
-        // Indices of Tool-role messages, oldest first.
-        let tool_ix: Vec<usize> = transcript
+        // Map each tool_call_id to its (tool, args) key so tool results can be
+        // deduplicated: re-Reading the same file 29 times is one key, not 29.
+        let mut key_of: std::collections::HashMap<&str, String> = std::collections::HashMap::new();
+        for m in transcript.iter() {
+            for tc in &m.tool_calls {
+                key_of.insert(tc.id.as_str(), format!("{}:{}", tc.name, tc.arguments));
+            }
+        }
+        // Tool-message indices with their dedupe key (fall back to the call id
+        // when we can't resolve a key, so unmatched results stay distinct).
+        let tool_ix: Vec<(usize, String)> = transcript
             .iter()
             .enumerate()
             .filter(|(_, m)| m.role == Role::Tool)
-            .map(|(i, _)| i)
+            .map(|(i, m)| {
+                let id = m.tool_call_id.as_deref().unwrap_or("");
+                let key = key_of.get(id).cloned().unwrap_or_else(|| format!("id:{id}"));
+                (i, key)
+            })
             .collect();
-        if tool_ix.len() <= keep_recent {
-            return;
+
+        // The last occurrence index of each distinct key.
+        let mut last_occ: std::collections::HashMap<&str, usize> = std::collections::HashMap::new();
+        for (i, key) in &tool_ix {
+            last_occ.insert(key.as_str(), *i);
         }
-        let age_upto = tool_ix.len() - keep_recent;
-        for &i in &tool_ix[..age_upto] {
-            let m = &mut transcript[i];
+        // Keep verbatim: the `keep_recent` most-recently-used DISTINCT keys
+        // (by their last occurrence). A hot file re-read many times stays.
+        let mut recents: Vec<(&str, usize)> = last_occ.iter().map(|(k, i)| (*k, *i)).collect();
+        recents.sort_by_key(|(_, i)| std::cmp::Reverse(*i)); // newest first
+        let keep: std::collections::HashSet<usize> = recents
+            .iter()
+            .take(keep_recent)
+            .map(|(_, i)| *i)
+            .collect();
+
+        for (i, _key) in &tool_ix {
+            // A tool message is kept verbatim only if it is the surviving
+            // (latest) occurrence of one of the recent distinct keys; every
+            // older duplicate and every out-of-window key is stubbed.
+            if keep.contains(i) {
+                continue;
+            }
+            let m = &mut transcript[*i];
             if m.content.ends_with(STUB_NOTE) {
                 continue; // already aged
             }
-            // Keep a short head so the model retains a hint of what it was.
             let head: String = m
                 .content
                 .lines()
@@ -471,7 +512,6 @@ impl AgentLoop {
                 .chars()
                 .take(200)
                 .collect();
-            // Only shrink when it actually saves space.
             let stubbed = format!("{head}{STUB_NOTE}");
             if stubbed.len() < m.content.len() {
                 m.content = stubbed;
@@ -1032,6 +1072,7 @@ impl AgentLoop {
             working_dir: self.working_dir.clone(),
             reasoning_effort: self.reasoning_effort,
             rate_limit_patience: self.rate_limit_patience,
+            aging_keep_recent: self.aging_keep_recent,
         };
         let limits = LoopLimits {
             max_iterations: 15,
@@ -1273,7 +1314,7 @@ impl AgentLoop {
             // cost (the loop re-sends the whole transcript each turn). Keep the
             // most recent few verbatim; stub the rest. This compounds across
             // iterations since we mutate the carried transcript.
-            Self::age_tool_outputs(&mut transcript, 6);
+            Self::age_tool_outputs(&mut transcript, self.aging_keep_recent);
             // Keep the transcript within the per-call window budget, folding the
             // oldest turns into a compact summary thread instead of a hard gap.
             use harxes_core_domain::domain::value_objects::compress_transcript_to_budget;
@@ -1658,6 +1699,42 @@ mod tests {
         // Idempotent: a second pass doesn't shrink further.
         let a2: usize = { AgentLoop::age_tool_outputs(&mut t, 3); t.iter().map(|m| m.content.len()).sum() };
         assert_eq!(a2, after);
+    }
+
+    #[test]
+    fn aging_pins_hot_file_and_dedupes_rereads() {
+        use harxes_core_domain::domain::value_objects::{Message, ToolCall};
+        let big = "HEADLINE\n".to_string() + &"y".repeat(3000);
+        let mut t = vec![Message::new(Role::User, "go")];
+        // Interleave: read the SAME hot file 20 times, plus 20 other distinct
+        // reads. keep_recent=6 distinct.
+        for i in 0..20 {
+            // hot file (same args every time)
+            t.push(Message::assistant_with_tools(vec![ToolCall {
+                id: format!("hot{i}"), name: "Read".into(),
+                arguments: r#"{"path":"forge_review.rs"}"#.into(),
+            }]));
+            t.push(Message::tool_result(format!("hot{i}"), big.clone()));
+            // a distinct cold file
+            t.push(Message::assistant_with_tools(vec![ToolCall {
+                id: format!("cold{i}"), name: "Read".into(),
+                arguments: format!("{{\"path\":\"cold{i}.rs\"}}"),
+            }]));
+            t.push(Message::tool_result(format!("cold{i}"), big.clone()));
+        }
+        AgentLoop::age_tool_outputs(&mut t, 6);
+        // The hot file's LATEST read (hot19) must be verbatim (not stubbed):
+        let hot_latest = t.iter().find(|m| m.tool_call_id.as_deref() == Some("hot19")).unwrap();
+        assert!(hot_latest.content.len() > 1000, "hot file latest read must stay verbatim");
+        // All 19 EARLIER hot reads are stubbed (deduped) — big token win.
+        let hot_stubbed = (0..19).filter(|i| {
+            t.iter().find(|m| m.tool_call_id.as_deref() == Some(&format!("hot{i}"))).unwrap()
+                .content.contains("output elided")
+        }).count();
+        assert_eq!(hot_stubbed, 19, "older duplicate reads must be stubbed");
+        // Total verbatim tool results == 6 distinct keys kept.
+        let verbatim = t.iter().filter(|m| m.role == Role::Tool && m.content.len() > 1000).count();
+        assert_eq!(verbatim, 6);
     }
 
     #[test]
