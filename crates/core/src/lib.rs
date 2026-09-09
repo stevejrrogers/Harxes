@@ -161,6 +161,9 @@ pub enum RunEvent {
         /// Cumulative reasoning ("thinking") tokens, when the provider reports
         /// them separately. `None` = not reported.
         reasoning_tokens: Option<u64>,
+        /// Size of the context sent on THIS iteration (this call's input
+        /// tokens) — watch it to verify compaction is keeping context small.
+        context_tokens: u64,
     },
     /// A transient failure triggered a backoff before retrying.
     Retry { wait_secs: u64 },
@@ -309,12 +312,14 @@ impl ToolObserver for EventObserver {
         input_tokens: u64,
         output_tokens: u64,
         reasoning_tokens: Option<u64>,
+        context_tokens: u64,
     ) {
         let _ = self.tx.send(RunEvent::Iteration {
             n,
             input_tokens,
             output_tokens,
             reasoning_tokens,
+            context_tokens,
         });
     }
     fn on_retry(&self, wait_secs: u64) {

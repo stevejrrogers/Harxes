@@ -22,6 +22,7 @@ pub trait ToolObserver: Send + Sync {
         _input_tokens: u64,
         _output_tokens: u64,
         _reasoning_tokens: Option<u64>,
+        _context_tokens: u64,
     ) {
     }
     /// Called when a transient LLM failure triggers a backoff wait before

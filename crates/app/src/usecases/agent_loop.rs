@@ -430,6 +430,46 @@ impl AgentLoop {
         result
     }
 
+    /// Replace all but the most recent `keep_recent` tool-result messages with
+    /// a short stub (their first ~2 lines + an elision note), so old tool
+    /// output stops inflating the re-sent context every iteration. Idempotent:
+    /// already-stubbed results are left alone.
+    fn age_tool_outputs(transcript: &mut [Message], keep_recent: usize) {
+        const STUB_NOTE: &str = "\n[… output elided to save context — re-run the tool or Read the file if you still need it]";
+        // Indices of Tool-role messages, oldest first.
+        let tool_ix: Vec<usize> = transcript
+            .iter()
+            .enumerate()
+            .filter(|(_, m)| m.role == Role::Tool)
+            .map(|(i, _)| i)
+            .collect();
+        if tool_ix.len() <= keep_recent {
+            return;
+        }
+        let age_upto = tool_ix.len() - keep_recent;
+        for &i in &tool_ix[..age_upto] {
+            let m = &mut transcript[i];
+            if m.content.ends_with(STUB_NOTE) {
+                continue; // already aged
+            }
+            // Keep a short head so the model retains a hint of what it was.
+            let head: String = m
+                .content
+                .lines()
+                .take(2)
+                .collect::<Vec<_>>()
+                .join("\n")
+                .chars()
+                .take(200)
+                .collect();
+            // Only shrink when it actually saves space.
+            let stubbed = format!("{head}{STUB_NOTE}");
+            if stubbed.len() < m.content.len() {
+                m.content = stubbed;
+            }
+        }
+    }
+
     /// Heuristic success flag for a tool result string, so a UI can color the
     /// outcome without parsing. Bash uses its exit code; other tools fail when
     /// the result opens with a known error prefix.
@@ -1212,6 +1252,12 @@ impl AgentLoop {
                 truncated = true;
                 break;
             }
+            // Age out old tool outputs: the model already consumed them, and
+            // re-sending large results every iteration is the dominant input
+            // cost (the loop re-sends the whole transcript each turn). Keep the
+            // most recent few verbatim; stub the rest. This compounds across
+            // iterations since we mutate the carried transcript.
+            Self::age_tool_outputs(&mut transcript, 6);
             // Keep the transcript within the per-call window budget, folding the
             // oldest turns into a compact summary thread instead of a hard gap.
             use harxes_core_domain::domain::value_objects::compress_transcript_to_budget;
@@ -1236,7 +1282,13 @@ impl AgentLoop {
             // the iteration/token guardrails (a run that dies at the cap now
             // has a visible trail leading up to it).
             if let Some(obs) = &self.observer {
-                obs.on_iteration(iterations, total_input, total_output, total_reasoning);
+                obs.on_iteration(
+                    iterations,
+                    total_input,
+                    total_output,
+                    total_reasoning,
+                    resp.usage.input_tokens,
+                );
             }
             if total_tokens > limits.max_total_tokens {
                 truncated = true;
@@ -1565,6 +1617,31 @@ mod tests {
                 exit_status: ShellExitStatus::Success,
             })
         }
+    }
+
+    #[test]
+    fn tool_output_aging_stubs_old_results() {
+        use harxes_core_domain::domain::value_objects::Message;
+        let big = "LINE1\n".to_string() + &"x".repeat(5000);
+        let mut t = vec![Message::new(Role::User, "go")];
+        for i in 0..10 {
+            t.push(Message::assistant_with_tools(vec![]));
+            t.push(Message::tool_result(format!("id{i}"), big.clone()));
+        }
+        let before: usize = t.iter().map(|m| m.content.len()).sum();
+        AgentLoop::age_tool_outputs(&mut t, 3);
+        let after: usize = t.iter().map(|m| m.content.len()).sum();
+        assert!(after < before / 2, "aging should shrink a lot: {before}->{after}");
+        // The 3 most recent tool results stay full.
+        let full = t.iter().filter(|m| m.role == Role::Tool && m.content.len() > 1000).count();
+        assert_eq!(full, 3);
+        // Older ones carry the elision note + a head hint.
+        let stubbed: Vec<_> = t.iter().filter(|m| m.role == Role::Tool && m.content.contains("output elided")).collect();
+        assert_eq!(stubbed.len(), 7);
+        assert!(stubbed[0].content.contains("LINE1"));
+        // Idempotent: a second pass doesn't shrink further.
+        let a2: usize = { AgentLoop::age_tool_outputs(&mut t, 3); t.iter().map(|m| m.content.len()).sum() };
+        assert_eq!(a2, after);
     }
 
     #[test]
