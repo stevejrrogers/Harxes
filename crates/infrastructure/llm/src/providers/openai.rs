@@ -332,6 +332,7 @@ impl OpenAiClient {
 
     fn build_http() -> reqwest::Client {
         reqwest::Client::builder()
+            .user_agent(concat!("harxes/", env!("CARGO_PKG_VERSION")))
             .connect_timeout(std::time::Duration::from_secs(20))
             .read_timeout(std::time::Duration::from_secs(120))
             .build()

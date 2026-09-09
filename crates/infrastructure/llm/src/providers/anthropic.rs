@@ -161,6 +161,7 @@ impl AnthropicClient {
     pub fn new(base_url: impl Into<String>, api_key: impl Into<String>) -> Self {
         Self {
             http: reqwest::Client::builder()
+                .user_agent(concat!("harxes/", env!("CARGO_PKG_VERSION")))
                 .connect_timeout(std::time::Duration::from_secs(20))
                 .read_timeout(std::time::Duration::from_secs(120))
                 .build()
