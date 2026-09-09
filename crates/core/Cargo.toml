@@ -1,0 +1,17 @@
+[package]
+name = "harxes-core"
+version.workspace = true
+edition.workspace = true
+description = "Embeddable, in-process Harxes agent engine (no CLI/TTY)."
+
+[dependencies]
+harxes-core-domain = { path = "../core-domain" }
+harxes-app = { path = "../app" }
+harxes-infra-llm = { path = "../infrastructure/llm" }
+harxes-infra-shell = { path = "../infrastructure/shell" }
+harxes-infra-fs = { path = "../infrastructure/fs" }
+async-trait = { workspace = true }
+tokio = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true }

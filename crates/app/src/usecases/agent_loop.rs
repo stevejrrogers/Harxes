@@ -1198,6 +1198,19 @@ impl AgentLoop {
             .map(|(o, _)| o)
     }
 
+    /// Drive the tool-calling loop over a pre-built transcript, returning both
+    /// the outcome and the final transcript. The embeddable engine uses this to
+    /// run with caller-supplied history/system prompts.
+    pub async fn run_transcript(
+        &self,
+        provider_id: &ProviderId,
+        model_id: &str,
+        transcript: Vec<Message>,
+        limits: &LoopLimits,
+    ) -> Result<(LoopOutcome, Vec<Message>), LlmError> {
+        self.run_loop(provider_id, model_id, transcript, limits).await
+    }
+
     fn persist_session(&self, transcript: &[Message]) {
         if let Some((store, id)) = &self.session {
             use harxes_core_domain::ports::SessionRecord;

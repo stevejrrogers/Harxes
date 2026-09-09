@@ -517,6 +517,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "harxes-core"
+version = "0.2.0"
+dependencies = [
+ "async-trait",
+ "harxes-app",
+ "harxes-core-domain",
+ "harxes-infra-fs",
+ "harxes-infra-llm",
+ "harxes-infra-shell",
+ "tokio",
+]
+
+[[package]]
 name = "harxes-core-domain"
 version = "0.2.0"
 dependencies = [
