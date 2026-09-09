@@ -285,7 +285,7 @@ impl AgentLoop {
             let ok = Self::tool_succeeded(&result);
             obs.on_tool_end(
                 call.name.as_str(),
-                &Self::preview(result.as_str(), 100),
+                &Self::result_line(result.as_str()),
                 duration_ms,
                 ok,
             );
@@ -440,6 +440,28 @@ impl AgentLoop {
         ];
         let lower = t.to_lowercase();
         !ERR_PREFIXES.iter().any(|p| lower.starts_with(p))
+    }
+
+    /// A clean one-line conclusion for a tool result: the first non-empty
+    /// line (where tools put their headline — "12 matches in 3 files",
+    /// "edited x", "exit=0 ...") with control characters stripped and capped.
+    fn result_line(result: &str) -> String {
+        let line = result
+            .lines()
+            .map(str::trim)
+            .find(|l| !l.is_empty())
+            .unwrap_or("");
+        let cleaned: String = line
+            .chars()
+            .filter(|c| !c.is_control() || *c == '\t')
+            .collect();
+        let cleaned = cleaned.replace('\t', " ");
+        let head: String = cleaned.chars().take(100).collect();
+        if cleaned.chars().count() > 100 {
+            format!("{head}…")
+        } else {
+            head
+        }
     }
 
     fn preview(raw: &str, max: usize) -> String {
@@ -1513,6 +1535,26 @@ mod tests {
                 exit_status: ShellExitStatus::Success,
             })
         }
+    }
+
+    #[test]
+    fn result_line_is_clean_first_line() {
+        assert_eq!(
+            AgentLoop::result_line("12 matches in 3 files:\nsrc/a.rs:\n  4: foo"),
+            "12 matches in 3 files:"
+        );
+        // Control chars stripped.
+        assert_eq!(AgentLoop::result_line("edited x\x07\x1b[0m (5 bytes)"), "edited x[0m (5 bytes)");
+        // Leading blank lines skipped.
+        assert_eq!(AgentLoop::result_line("\n\n  done  \n"), "done");
+    }
+
+    #[test]
+    fn tool_success_flag() {
+        assert!(AgentLoop::tool_succeeded("exit=0 stdout=ok stderr="));
+        assert!(!AgentLoop::tool_succeeded("exit=1 stdout= stderr=boom"));
+        assert!(!AgentLoop::tool_succeeded("edit error foo"));
+        assert!(AgentLoop::tool_succeeded("edited x (5 bytes)"));
     }
 
     #[test]

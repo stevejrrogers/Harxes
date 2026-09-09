@@ -131,6 +131,33 @@ fn build_tools(tools: &[ToolSpec]) -> Vec<ToolDef<'_>> {
       }).collect()
 }
 
+/// Break a long run of reasoning that arrives without newlines into readable
+/// segments: once the current line exceeds ~300 chars, insert a newline at the
+/// next sentence boundary (or hard-wrap at ~500 chars). Keeps the token-delta
+/// stream but stops a consumer from coalescing one giant line. `since_nl` is
+/// the char count on the current line so far; returns (emitted, new_since_nl).
+fn segment_reasoning(delta: &str, mut since_nl: usize) -> (String, usize) {
+    let mut out = String::with_capacity(delta.len() + 2);
+    for ch in delta.chars() {
+        if ch == '\n' {
+            out.push(ch);
+            since_nl = 0;
+            continue;
+        }
+        out.push(ch);
+        since_nl += 1;
+        if since_nl >= 300 && matches!(ch, '.' | '!' | '?') {
+            out.push('\n');
+            since_nl = 0;
+        } else if since_nl >= 500 && ch == ' ' {
+            out.pop();
+            out.push('\n');
+            since_nl = 0;
+        }
+    }
+    (out, since_nl)
+}
+
 /// Parse the `Retry-After` header (seconds form) into a value for backoff.
 fn retry_after_secs(resp: &reqwest::Response) -> Option<u64> {
     resp.headers()
@@ -566,8 +593,11 @@ impl LlmPort for OpenAiClient {
                             delta.get("reasoning_content").and_then(|x| x.as_str())
                         {
                             if !t.is_empty() {
-                                reasoning.push_str(t);
-                                sink(StreamEvent::Reasoning(t.to_string()));
+                                let since = reasoning.len()
+                                    - reasoning.rfind('\n').map(|i| i + 1).unwrap_or(0);
+                                let (seg, _) = segment_reasoning(t, since);
+                                reasoning.push_str(&seg);
+                                sink(StreamEvent::Reasoning(seg));
                             }
                         }
                         if let Some(tcs) = delta.get("tool_calls").and_then(|x| x.as_array()) {
@@ -640,7 +670,21 @@ mod vision_tests {
 
 #[cfg(test)]
 mod url_tests {
-    use super::OpenAiClient;
+    use super::{segment_reasoning, OpenAiClient};
+
+    #[test]
+    fn reasoning_segmentation_breaks_long_runs() {
+        // A ~400-char run with sentence boundaries and no newline gets broken.
+        let long = "This is a sentence. ".repeat(25); // 500 chars, boundaries
+        let (out, _) = segment_reasoning(&long, 0);
+        assert!(out.contains('\n'), "expected a break inserted");
+        // Every emitted line stays under the hard-wrap ceiling.
+        assert!(out.lines().all(|l| l.chars().count() <= 520));
+        // Short input passes through unchanged.
+        let (short, n) = segment_reasoning("brief thought", 0);
+        assert_eq!(short, "brief thought");
+        assert_eq!(n, 13);
+    }
 
     #[test]
     fn copilot_client_targets_copilot_endpoint() {

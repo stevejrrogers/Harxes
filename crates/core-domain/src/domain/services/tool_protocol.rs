@@ -252,8 +252,12 @@ pub fn tool_summary(name: &str, raw: &str) -> String {
     let display = name.strip_prefix("mcp__").unwrap_or(name);
     match arg {
         Some(a) if !a.is_empty() => {
-            let head: String = a.chars().take(100).collect();
-            let head = head.replace('\n', " ");
+            let clean: String = a
+                .chars()
+                .map(|c| if c == '\n' || c == '\t' { ' ' } else { c })
+                .filter(|c| !c.is_control())
+                .collect();
+            let head: String = clean.chars().take(100).collect();
             let ell = if a.chars().count() > 100 { "…" } else { "" };
             format!("{display} {head}{ell}")
         }
