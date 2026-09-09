@@ -526,6 +526,7 @@ dependencies = [
  "harxes-infra-fs",
  "harxes-infra-llm",
  "harxes-infra-shell",
+ "serde",
  "tokio",
 ]
 

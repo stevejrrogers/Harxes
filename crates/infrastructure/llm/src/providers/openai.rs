@@ -212,11 +212,81 @@ struct Usage {
     completion_tokens: u64,
 }
 
-/// OpenAI Chat Completions API driven adapter with native tool-calling.
+/// How requests authenticate. `Static` is a fixed bearer (OpenAI, LiteLLM);
+/// `Copilot` exchanges a GitHub OAuth token for a short-lived Copilot bearer
+/// and refreshes it on expiry.
+enum Auth {
+    Static(String),
+    Copilot(std::sync::Arc<CopilotAuth>),
+}
+
+/// GitHub Copilot token exchange: swaps a long-lived GitHub OAuth token for a
+/// short-lived (~25 min) Copilot bearer, cached until just before it expires.
+struct CopilotAuth {
+    github_token: String,
+    // (bearer, expires_at_unix_secs)
+    cached: tokio::sync::Mutex<Option<(String, u64)>>,
+}
+
+impl CopilotAuth {
+    async fn bearer(&self, http: &reqwest::Client) -> Result<String, LlmError> {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        {
+            let guard = self.cached.lock().await;
+            if let Some((tok, exp)) = guard.as_ref() {
+                if *exp > now + 60 {
+                    return Ok(tok.clone());
+                }
+            }
+        }
+        // Refresh via the Copilot token endpoint.
+        let resp = http
+            .get("https://api.github.com/copilot_internal/v2/token")
+            .header("Authorization", format!("token {}", self.github_token))
+            .header("Editor-Version", "vscode/1.95.0")
+            .header("User-Agent", "GitHubCopilotChat/0.22.0")
+            .send()
+            .await
+            .map_err(|e| LlmError::Request(format!("copilot token exchange: {e}")))?;
+        if resp.status() == reqwest::StatusCode::UNAUTHORIZED
+            || resp.status() == reqwest::StatusCode::FORBIDDEN
+        {
+            return Err(LlmError::Auth {
+                provider: ProviderId::new("copilot").unwrap(),
+            });
+        }
+        if !resp.status().is_success() {
+            return Err(LlmError::Request(format!(
+                "copilot token exchange HTTP {}",
+                resp.status()
+            )));
+        }
+        let v: serde_json::Value = resp
+            .json()
+            .await
+            .map_err(|e| LlmError::Request(format!("copilot token decode: {e}")))?;
+        let token = v
+            .get("token")
+            .and_then(|x| x.as_str())
+            .ok_or_else(|| LlmError::Request("copilot token: no `token` field".into()))?
+            .to_string();
+        let exp = v.get("expires_at").and_then(|x| x.as_u64()).unwrap_or(now + 1500);
+        *self.cached.lock().await = Some((token.clone(), exp));
+        Ok(token)
+    }
+}
+
+/// OpenAI-compatible Chat Completions adapter with native tool-calling. Also
+/// backs LiteLLM proxies and (via [`OpenAiClient::copilot`]) GitHub Copilot.
 pub struct OpenAiClient {
     http: reqwest::Client,
     base_url: String,
-    api_key: String,
+    auth: Auth,
+    /// Extra headers sent on every chat request (Copilot integration headers).
+    extra_headers: Vec<(&'static str, &'static str)>,
 }
 
 impl OpenAiClient {
@@ -234,15 +304,57 @@ impl OpenAiClient {
             url.push_str("/chat/completions");
         }
         Self {
-            http: reqwest::Client::builder()
-                .connect_timeout(std::time::Duration::from_secs(20))
-                .read_timeout(std::time::Duration::from_secs(120))
-                .build()
-                .unwrap_or_default(),
+            http: Self::build_http(),
             base_url: url,
-            api_key: api_key.into(),
+            auth: Auth::Static(api_key.into()),
+            extra_headers: Vec::new(),
         }
     }
+
+    /// A GitHub Copilot client: talks to the Copilot chat/completions endpoint
+    /// (OpenAI-compatible body) using a GitHub OAuth token, which it exchanges
+    /// for short-lived Copilot bearers and refreshes automatically.
+    pub fn copilot(github_token: impl Into<String>) -> Self {
+        Self {
+            http: Self::build_http(),
+            base_url: "https://api.githubcopilot.com/chat/completions".to_string(),
+            auth: Auth::Copilot(std::sync::Arc::new(CopilotAuth {
+                github_token: github_token.into(),
+                cached: tokio::sync::Mutex::new(None),
+            })),
+            extra_headers: vec![
+                ("Copilot-Integration-Id", "vscode-chat"),
+                ("Editor-Version", "vscode/1.95.0"),
+                ("Editor-Plugin-Version", "copilot-chat/0.22.0"),
+            ],
+        }
+    }
+
+    fn build_http() -> reqwest::Client {
+        reqwest::Client::builder()
+            .connect_timeout(std::time::Duration::from_secs(20))
+            .read_timeout(std::time::Duration::from_secs(120))
+            .build()
+            .unwrap_or_default()
+    }
+
+    /// Resolve the current bearer (refreshing a Copilot token if needed) and
+    /// apply auth + integration headers to a request builder.
+    async fn authorize(
+        &self,
+        req: reqwest::RequestBuilder,
+    ) -> Result<reqwest::RequestBuilder, LlmError> {
+        let bearer = match &self.auth {
+            Auth::Static(k) => k.clone(),
+            Auth::Copilot(c) => c.bearer(&self.http).await?,
+        };
+        let mut req = req.bearer_auth(bearer);
+        for (k, v) in &self.extra_headers {
+            req = req.header(*k, *v);
+        }
+        Ok(req)
+    }
+
     fn url(&self) -> String {
         self.base_url.clone()
     }
@@ -258,10 +370,8 @@ impl LlmPort for OpenAiClient {
             .trim_end_matches('/')
             .to_string()
             + "/models";
-        let resp = self
-            .http
-            .get(&url)
-            .bearer_auth(&self.api_key)
+        let req = self.authorize(self.http.get(&url)).await?;
+        let resp = req
             .send()
             .await
             .map_err(|e| LlmError::Request(format!("transport error : {e}")))?;
@@ -299,14 +409,8 @@ impl LlmPort for OpenAiClient {
             temperature,
             tools: build_tools(tools),
         };
-        let resp = match self
-            .http
-            .post(self.url())
-            .bearer_auth(&self.api_key)
-            .json(&body)
-            .send()
-            .await
-        {
+        let req = self.authorize(self.http.post(self.url()).json(&body)).await?;
+        let resp = match req.send().await {
             Ok(r) => r,
             Err(e) => return Err(LlmError::Request(format!("transport error : {e}"))),
         };
@@ -385,14 +489,8 @@ impl LlmPort for OpenAiClient {
             "tools": build_tools(tools),
         });
 
-        let resp = match self
-            .http
-            .post(self.url())
-            .bearer_auth(&self.api_key)
-            .json(&body)
-            .send()
-            .await
-        {
+        let req = self.authorize(self.http.post(self.url()).json(&body)).await?;
+        let resp = match req.send().await {
             Ok(r) => r,
             Err(e) => return Err(LlmError::Request(format!("transport error : {e}"))),
         };
@@ -542,6 +640,17 @@ mod vision_tests {
 #[cfg(test)]
 mod url_tests {
     use super::OpenAiClient;
+
+    #[test]
+    fn copilot_client_targets_copilot_endpoint() {
+        let c = OpenAiClient::copilot("gho_faketoken");
+        assert_eq!(c.url(), "https://api.githubcopilot.com/chat/completions");
+        assert!(matches!(c.auth, super::Auth::Copilot(_)));
+        assert!(c
+            .extra_headers
+            .iter()
+            .any(|(k, v)| *k == "Copilot-Integration-Id" && *v == "vscode-chat"));
+    }
 
     #[test]
     fn appends_chat_completions_to_api_roots() {

@@ -139,6 +139,7 @@ pub fn build_llm(rp: &ResolvedProvider) -> Result<Arc<dyn LlmPort>, String> {
                 .ok_or_else(|| format!("missing API key env var {}", d.api_key_env_var))?;
             match d.id {
                 "anthropic" => Ok(Arc::new(AnthropicClient::new(d.base_url, key))),
+                "copilot" => Ok(Arc::new(OpenAiClient::copilot(key))),
                 _ => Ok(Arc::new(OpenAiClient::new(d.base_url, key))),
             }
         }

@@ -19,6 +19,7 @@
 //!   [`ShellPort`]/[`FileSystemPort`] via [`EngineConfig`]; the engine never
 //!   picks a sandbox policy itself.
 
+use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -41,6 +42,10 @@ pub enum ProviderSpec {
     /// Any OpenAI-compatible Chat Completions endpoint (OpenAI, LiteLLM,
     /// local servers). `base_url` may be an API root (`.../v1`) or a full URL.
     OpenAiCompatible { base_url: String, api_key: String },
+    /// GitHub Copilot via its native API. `github_token` is a GitHub OAuth
+    /// token (e.g. from `gh auth token`); the client exchanges it for a
+    /// short-lived Copilot bearer and refreshes it automatically.
+    Copilot { github_token: String },
 }
 
 /// How the engine resolves an operation the command policy marks "ask". There
@@ -108,7 +113,7 @@ pub struct RunRequest {
 }
 
 /// A live event emitted while a run executes. Consumed off the event channel.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum RunEvent {
     /// A chunk of streamed assistant text.
     Text(String),
@@ -123,7 +128,7 @@ pub enum RunEvent {
 }
 
 /// Why a run stopped. Machine-readable for the host's classifier.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum StopReason {
     /// The model finished normally.
     Done,
@@ -132,7 +137,7 @@ pub enum StopReason {
 }
 
 /// The structured result of a completed run.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RunOutcome {
     pub final_text: String,
     /// Full machine-readable transcript (system/user/assistant/tool turns).
@@ -164,7 +169,7 @@ impl RunOutcome {
 
 /// Typed failure taxonomy for a run. The host classifies infra faults against
 /// these variants instead of grepping error strings.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum EngineError {
     /// The wall-clock budget was exceeded; children were killed.
     Timeout,
@@ -336,6 +341,17 @@ impl HarxesEngine {
                         api_key.clone(),
                     )),
                     "openai",
+                )
+            }
+            ProviderSpec::Copilot { github_token } => {
+                if github_token.trim().is_empty() {
+                    return Err(EngineError::Config("empty github_token".into()));
+                }
+                (
+                    Arc::new(harxes_infra_llm::providers::openai::OpenAiClient::copilot(
+                        github_token.clone(),
+                    )),
+                    "copilot",
                 )
             }
         };

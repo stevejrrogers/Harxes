@@ -28,12 +28,22 @@ pub const OPENAI: ProviderDescriptor = ProviderDescriptor {
     api_key_env_var: "OPENAI_API_KEY",
 };
 
+pub const COPILOT: ProviderDescriptor = ProviderDescriptor {
+    id: "copilot",
+    display_name: "GitHub Copilot",
+    base_url: "https://api.githubcopilot.com/chat/completions",
+    default_model: "gpt-4o",
+    // A GitHub OAuth token (e.g. `gh auth token`), exchanged for a Copilot
+    // bearer at request time.
+    api_key_env_var: "GITHUB_COPILOT_TOKEN",
+};
+
 /// Registry / simple factory over known providers.
 pub struct ProviderRegistry;
 
 impl ProviderRegistry {
     pub fn all() -> Vec<ProviderDescriptor> {
-        vec![ANTHROPIC.clone(), OPENAI.clone()]
+        vec![ANTHROPIC.clone(), OPENAI.clone(), COPILOT.clone()]
     }
 
     pub fn find(id: &str) -> Option<ProviderDescriptor> {
