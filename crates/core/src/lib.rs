@@ -23,15 +23,19 @@ use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use std::time::Duration;
 
-use harxes_app::usecases::agent_loop::{AgentLoop, LoopLimits, LoopOutcome};
-use harxes_core_domain::domain::value_objects::{
-    CommandPolicy, Message, ProviderId, Role,
-};
-use harxes_core_domain::ports::{
-    FileSystemPort, LlmError, LlmPort, PermissionDecider, ShellPort, ToolObserver,
-};
+use harxes_app::usecases::agent_loop::{AgentLoop, LoopOutcome};
+use harxes_core_domain::domain::value_objects::{ProviderId, Role};
+use harxes_core_domain::ports::{LlmError, LlmPort, PermissionDecider, ToolObserver};
 
-pub use harxes_core_domain::domain::value_objects::Message as ChatMessage;
+// Re-export everything a caller needs to build an [`EngineConfig`] and read
+// results, so hosts depend on `harxes-core` alone (not the internal crates).
+pub use harxes_app::usecases::agent_loop::LoopLimits;
+pub use harxes_core_domain::domain::value_objects::{
+    CommandPolicy, Message, Message as ChatMessage,
+};
+pub use harxes_core_domain::ports::{
+    CommandOutput, FileSystemPort, ShellError, ShellExitStatus, ShellPort,
+};
 
 /// Which model backend to talk to. Credentials are passed explicitly — the
 /// engine never reads process environment or a keychain.
