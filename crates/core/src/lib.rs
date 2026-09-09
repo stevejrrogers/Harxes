@@ -158,6 +158,9 @@ pub enum RunEvent {
         n: usize,
         input_tokens: u64,
         output_tokens: u64,
+        /// Cumulative reasoning ("thinking") tokens, when the provider reports
+        /// them separately. `None` = not reported.
+        reasoning_tokens: Option<u64>,
     },
     /// A transient failure triggered a backoff before retrying.
     Retry { wait_secs: u64 },
@@ -182,6 +185,8 @@ pub struct RunOutcome {
     pub input_tokens: u64,
     pub output_tokens: u64,
     pub total_tokens: u64,
+    /// Reasoning tokens (subset of output), when the provider reports them.
+    pub reasoning_tokens: Option<u64>,
     pub stop_reason: StopReason,
 }
 
@@ -194,6 +199,7 @@ impl RunOutcome {
             input_tokens: o.input_tokens,
             output_tokens: o.output_tokens,
             total_tokens: o.usage_total_tokens,
+            reasoning_tokens: o.reasoning_tokens,
             stop_reason: if o.truncated_by_guardrail {
                 StopReason::Guardrail
             } else {
@@ -297,11 +303,18 @@ impl ToolObserver for EventObserver {
             ok,
         });
     }
-    fn on_iteration(&self, n: usize, input_tokens: u64, output_tokens: u64) {
+    fn on_iteration(
+        &self,
+        n: usize,
+        input_tokens: u64,
+        output_tokens: u64,
+        reasoning_tokens: Option<u64>,
+    ) {
         let _ = self.tx.send(RunEvent::Iteration {
             n,
             input_tokens,
             output_tokens,
+            reasoning_tokens,
         });
     }
     fn on_retry(&self, wait_secs: u64) {
@@ -601,7 +614,7 @@ mod tests {
         let evs = collected.lock().unwrap();
         // Iteration events with cumulative tokens.
         let iters: Vec<_> = evs.iter().filter_map(|e| match e {
-            RunEvent::Iteration { n, input_tokens, output_tokens } => Some((*n, *input_tokens, *output_tokens)),
+            RunEvent::Iteration { n, input_tokens, output_tokens, .. } => Some((*n, *input_tokens, *output_tokens)),
             _ => None,
         }).collect();
         assert!(iters.len() >= 2, "expected >=2 iteration events, got {iters:?}");

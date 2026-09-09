@@ -16,7 +16,14 @@ pub trait ToolObserver: Send + Sync {
     }
     /// Called once per agent-loop iteration with cumulative token usage, so a
     /// UI can show progress toward the iteration/token guardrails. Default: no-op.
-    fn on_iteration(&self, _n: usize, _input_tokens: u64, _output_tokens: u64) {}
+    fn on_iteration(
+        &self,
+        _n: usize,
+        _input_tokens: u64,
+        _output_tokens: u64,
+        _reasoning_tokens: Option<u64>,
+    ) {
+    }
     /// Called when a transient LLM failure triggers a backoff wait before
     /// retrying. `wait_secs` is how long we will sleep.
     fn on_retry(&self, _wait_secs: u64) {}

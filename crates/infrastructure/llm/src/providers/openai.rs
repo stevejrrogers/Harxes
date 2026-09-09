@@ -239,6 +239,14 @@ struct ResponseFunction {
 struct Usage {
     prompt_tokens: u64,
     completion_tokens: u64,
+    #[serde(default)]
+    completion_tokens_details: Option<CompletionDetails>,
+}
+
+#[derive(serde::Deserialize)]
+struct CompletionDetails {
+    #[serde(default)]
+    reasoning_tokens: Option<u64>,
 }
 
 /// How requests authenticate. `Static` is a fixed bearer (OpenAI, LiteLLM);
@@ -491,7 +499,12 @@ impl LlmPort for OpenAiClient {
                     .collect();
                 Ok(AgentResponse {
                     content,
-                    usage: TokenUsage::new(rb.usage.prompt_tokens, rb.usage.completion_tokens),
+                    usage: TokenUsage::new(rb.usage.prompt_tokens, rb.usage.completion_tokens)
+                        .with_reasoning(
+                            rb.usage
+                                .completion_tokens_details
+                                .and_then(|d| d.reasoning_tokens),
+                        ),
                     tool_calls,
                 })
             }
@@ -543,6 +556,7 @@ impl LlmPort for OpenAiClient {
         let mut reasoning = String::new();
         let mut prompt_tokens: u64 = 0;
         let mut completion_tokens: u64 = 0;
+        let mut reasoning_tokens: Option<u64> = None;
         // Accumulate tool calls by their stream index.
         let mut tool_calls: std::collections::BTreeMap<usize, ToolCall> =
             std::collections::BTreeMap::new();
@@ -577,6 +591,13 @@ impl LlmPort for OpenAiClient {
                                 .get("completion_tokens")
                                 .and_then(|x| x.as_u64())
                                 .unwrap_or(0);
+                            if let Some(rt) = u
+                                .get("completion_tokens_details")
+                                .and_then(|d| d.get("reasoning_tokens"))
+                                .and_then(|x| x.as_u64())
+                            {
+                                reasoning_tokens = Some(rt);
+                            }
                         }
                         let Some(choice) = v
                             .get("choices")
@@ -646,7 +667,8 @@ impl LlmPort for OpenAiClient {
         }
         Ok(AgentResponse {
             content: text,
-            usage: TokenUsage::new(prompt_tokens, completion_tokens),
+            usage: TokenUsage::new(prompt_tokens, completion_tokens)
+                .with_reasoning(reasoning_tokens),
             tool_calls,
         })
     }

@@ -38,6 +38,8 @@ pub struct LoopOutcome {
     pub usage_total_tokens: u64,
     pub input_tokens: u64,
     pub output_tokens: u64,
+    /// Reasoning tokens (subset of output), when the provider reports them.
+    pub reasoning_tokens: Option<u64>,
     pub truncated_by_guardrail: bool,
 }
 
@@ -1202,6 +1204,7 @@ impl AgentLoop {
         let mut total_tokens = 0u64;
         let mut total_input = 0u64;
         let mut total_output = 0u64;
+        let mut total_reasoning: Option<u64> = None;
         let mut truncated = false;
 
         loop {
@@ -1225,12 +1228,15 @@ impl AgentLoop {
             total_tokens += resp.usage.total_tokens;
             total_input += resp.usage.input_tokens;
             total_output += resp.usage.output_tokens;
+            if let Some(rt) = resp.usage.reasoning_tokens {
+                total_reasoning = Some(total_reasoning.unwrap_or(0) + rt);
+            }
             iterations += 1;
             // Emit iteration progress so a UI can show how close the run is to
             // the iteration/token guardrails (a run that dies at the cap now
             // has a visible trail leading up to it).
             if let Some(obs) = &self.observer {
-                obs.on_iteration(iterations, total_input, total_output);
+                obs.on_iteration(iterations, total_input, total_output, total_reasoning);
             }
             if total_tokens > limits.max_total_tokens {
                 truncated = true;
@@ -1250,6 +1256,7 @@ impl AgentLoop {
                 let out = LoopOutcome {
                     final_text,
                     iterations,
+                    reasoning_tokens: total_reasoning,
                     usage_total_tokens: total_tokens,
                     input_tokens: total_input,
                     output_tokens: total_output,
@@ -1314,6 +1321,7 @@ impl AgentLoop {
                 usage_total_tokens: total_tokens,
                 input_tokens: total_input,
                 output_tokens: total_output,
+                reasoning_tokens: total_reasoning,
                 truncated_by_guardrail: truncated,
             },
             transcript,
