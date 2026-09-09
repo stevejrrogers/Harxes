@@ -204,7 +204,7 @@ pub fn assemble(
     let llm = build_llm(&rp)?;
     let llm_for_queries = llm.clone();
     let shell = Arc::new(TokioCommandShell::new(120));
-    let fsys = Arc::new(HostFileSystem);
+    let fsys = Arc::new(HostFileSystem::default());
     let active_tools: std::sync::Arc<std::sync::Mutex<Vec<String>>> =
         std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
     let streamed = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));

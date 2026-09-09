@@ -114,6 +114,12 @@ pub struct RunRequest {
     pub timeout: Option<Duration>,
     /// Per-run model override; falls back to [`EngineConfig::model`].
     pub model: Option<String>,
+    /// Working directory for this run: shell commands run here and relative
+    /// paths (Read/Write/Edit/Grep/Glob/List) resolve against it. Essential
+    /// in-process, where the process CWD is the host's, not the run's worktree.
+    /// `None` keeps the default (the default filesystem's own root / process
+    /// CWD). Ignored for a host-injected `EngineConfig.fs` (the host anchors it).
+    pub working_dir: Option<std::path::PathBuf>,
 }
 
 /// A live event emitted while a run executes. Consumed off the event channel.
@@ -308,7 +314,9 @@ impl RunHandle {
 pub struct HarxesEngine {
     llm: Arc<dyn LlmPort>,
     shell: Arc<dyn ShellPort>,
-    fs: Arc<dyn FileSystemPort>,
+    /// Host-injected filesystem, if any. When `None`, each run builds a default
+    /// `HostFileSystem` rooted at that run's `working_dir`.
+    custom_fs: Option<Arc<dyn FileSystemPort>>,
     provider_id: ProviderId,
     model: String,
     limits: LoopLimits,
@@ -364,13 +372,10 @@ impl HarxesEngine {
         let shell = config
             .shell
             .unwrap_or_else(|| Arc::new(harxes_infra_shell::TokioCommandShell::new(600)));
-        let fs = config
-            .fs
-            .unwrap_or_else(|| Arc::new(harxes_infra_fs::HostFileSystem));
         Ok(Self {
             llm,
             shell,
-            fs,
+            custom_fs: config.fs,
             provider_id,
             model: config.model,
             limits: config.limits,
@@ -386,11 +391,22 @@ impl HarxesEngine {
         let decider = Arc::new(HeadlessDecider {
             allow: self.permission == PermissionMode::AllowUnlessDenied,
         });
-        let agent = AgentLoop::new(self.llm.clone(), self.shell.clone(), self.fs.clone())
+        // Filesystem: a host-injected fs is used as-is; otherwise a default
+        // HostFileSystem rooted at this run's working_dir so relative paths and
+        // glob/grep resolve against the run's worktree, not the process CWD.
+        let fs: Arc<dyn FileSystemPort> = match (&self.custom_fs, &req.working_dir) {
+            (Some(f), _) => f.clone(),
+            (None, Some(wd)) => Arc::new(harxes_infra_fs::HostFileSystem::rooted(wd.clone())),
+            (None, None) => Arc::new(harxes_infra_fs::HostFileSystem::default()),
+        };
+        let mut agent = AgentLoop::new(self.llm.clone(), self.shell.clone(), fs)
             .with_streaming(true)
             .with_observer(Arc::new(EventObserver { tx }))
             .with_decider(decider)
             .with_command_policy(self.command_policy.clone());
+        if let Some(wd) = &req.working_dir {
+            agent = agent.with_working_dir(wd.to_string_lossy().to_string());
+        }
 
         let provider_id = self.provider_id.clone();
         let model = req.model.clone().unwrap_or_else(|| self.model.clone());
@@ -476,7 +492,7 @@ mod tests {
         HarxesEngine {
             llm,
             shell,
-            fs: Arc::new(DeadFs),
+            custom_fs: Some(Arc::new(DeadFs)),
             provider_id: ProviderId::new("x").unwrap(),
             model: "m".into(),
             limits: LoopLimits::default(),
@@ -500,6 +516,69 @@ mod tests {
         assert_eq!(out.stop_reason, StopReason::Done);
         // transcript: user + assistant (no system supplied).
         assert!(out.transcript.iter().any(|m| m.role == Role::User));
+    }
+
+    #[tokio::test]
+    async fn working_dir_anchors_bash_to_the_run_worktree() {
+        // LLM: first turn runs `pwd` via Bash, then stops. We assert the tool
+        // result reflects the run's working_dir, not the process CWD.
+        struct PwdLlm(std::sync::atomic::AtomicUsize);
+        #[async_trait::async_trait]
+        impl LlmPort for PwdLlm {
+            async fn generate(
+                &self,
+                _p: &ProviderId,
+                _m: &str,
+                _msgs: &[Message],
+                _t: &[ToolSpec],
+                _temp: Option<f64>,
+            ) -> Result<AgentResponse, LlmError> {
+                use harxes_core_domain::domain::value_objects::ToolCall;
+                let n = self.0.fetch_add(1, Ordering::SeqCst);
+                if n == 0 {
+                    Ok(AgentResponse {
+                        content: String::new(),
+                        usage: Default::default(),
+                        tool_calls: vec![ToolCall {
+                            id: "1".into(),
+                            name: "Bash".into(),
+                            arguments: r#"{"command":"pwd"}"#.into(),
+                        }],
+                    })
+                } else {
+                    Ok(AgentResponse::text("done", Default::default()))
+                }
+            }
+        }
+        let wd = std::env::temp_dir().join(format!("hx-wd-{}", std::process::id()));
+        std::fs::create_dir_all(&wd).unwrap();
+        let e = HarxesEngine {
+            llm: Arc::new(PwdLlm(std::sync::atomic::AtomicUsize::new(0))),
+            shell: Arc::new(harxes_infra_shell::TokioCommandShell::new(10)),
+            custom_fs: Some(Arc::new(DeadFs)),
+            provider_id: ProviderId::new("x").unwrap(),
+            model: "m".into(),
+            limits: LoopLimits::default(),
+            command_policy: CommandPolicy::default(),
+            permission: PermissionMode::AllowUnlessDenied,
+        };
+        let out = e
+            .run(RunRequest {
+                prompt: "where am i".into(),
+                working_dir: Some(wd.clone()),
+                ..Default::default()
+            })
+            .wait()
+            .await
+            .unwrap();
+        // The pwd tool result is in the transcript; it must contain our wd.
+        let joined: String = out.transcript.iter().map(|m| m.content.clone()).collect();
+        let canon = std::fs::canonicalize(&wd).unwrap();
+        assert!(
+            joined.contains(canon.to_string_lossy().as_ref())
+                || joined.contains(wd.to_string_lossy().as_ref()),
+            "bash did not run in the working_dir; transcript: {joined}"
+        );
     }
 
     #[tokio::test]

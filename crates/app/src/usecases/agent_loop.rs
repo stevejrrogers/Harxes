@@ -67,6 +67,10 @@ pub struct AgentLoop {
     /// Models to fail over to (in order) when the primary model errors out
     /// terminally after retries.
     fallback_models: Vec<String>,
+    /// Working directory for shell commands and relative path anchoring.
+    /// Defaults to "." (the process CWD); an embedding host sets the run's
+    /// worktree so tools don't operate against the host's directory.
+    working_dir: String,
 }
 
 impl AgentLoop {
@@ -91,7 +95,17 @@ impl AgentLoop {
             hooks: Default::default(),
             web: None,
             fallback_models: Vec::new(),
+            working_dir: ".".to_string(),
         }
+    }
+
+    /// Set the working directory for Bash and relative-path tools.
+    pub fn with_working_dir(mut self, dir: impl Into<String>) -> Self {
+        let d = dir.into();
+        if !d.trim().is_empty() {
+            self.working_dir = d;
+        }
+        self
     }
 
     /// Configure ordered fallback models used when the primary model fails.
@@ -235,8 +249,8 @@ impl AgentLoop {
                 ParsedArgs::Glob { pattern, max_depth } => {
                     self.glob(&pattern, max_depth).await
                 }
-                ParsedArgs::List { path } => Self::list_dir(&path),
-                ParsedArgs::Skill { name } => Self::load_skill(&name),
+                ParsedArgs::List { path } => self.list_dir_wd(&path),
+                ParsedArgs::Skill { name } => self.load_skill_wd(&name),
                 ParsedArgs::Delegate { task, context } => {
                     self.delegate_subtask(provider_id, model_id, &task, context.as_deref())
                         .await
@@ -357,7 +371,7 @@ impl AgentLoop {
                 continue;
             }
             let cmd = format!("{}{}", Self::hook_env(call), rule.command);
-            if let Ok(o) = self.shell.run_command(".", &cmd).await {
+            if let Ok(o) = self.shell.run_command(&self.working_dir, &cmd).await {
                 if o.exit_status == ShellExitStatus::Failure(2) {
                     let why = if o.stderr.trim().is_empty() {
                         o.stdout.trim().to_string()
@@ -383,7 +397,7 @@ impl AgentLoop {
                 continue;
             }
             let cmd = format!("{}{}", Self::hook_env(call), rule.command);
-            if let Ok(o) = self.shell.run_command(".", &cmd).await {
+            if let Ok(o) = self.shell.run_command(&self.working_dir, &cmd).await {
                 let out = o.stdout.trim();
                 if !out.is_empty() {
                     let capped: String = out.chars().take(1000).collect();
@@ -420,7 +434,7 @@ impl AgentLoop {
                 }
             }
         }
-        match self.shell.run_command(".", cmd).await {
+        match self.shell.run_command(&self.working_dir, cmd).await {
             Ok(o) => {
                 let code = match o.exit_status {
                     ShellExitStatus::Success => 0,
@@ -527,14 +541,16 @@ impl AgentLoop {
     }
 
     /// Load a skill's full instructions by name from `.harxes/skills/<name>/`
-    /// or `.claude/skills/<name>/SKILL.md` (frontmatter stripped).
-    fn load_skill(name: &str) -> String {
+    /// or `.claude/skills/<name>/SKILL.md` (frontmatter stripped), anchored to
+    /// the working directory.
+    fn load_skill_wd(&self, name: &str) -> String {
         let want = name.trim();
         if want.is_empty() {
             return "skill error: no skill name given".to_string();
         }
-        for root in [".harxes/skills", ".claude/skills"] {
-            let path = format!("{root}/{want}/SKILL.md");
+        let wd = &self.working_dir;
+        for sub in [".harxes/skills", ".claude/skills"] {
+            let path = format!("{wd}/{sub}/{want}/SKILL.md");
             if let Ok(content) = std::fs::read_to_string(&path) {
                 // Strip a leading `---` frontmatter block if present.
                 let body = match content.trim_start().strip_prefix("---") {
@@ -548,6 +564,21 @@ impl AgentLoop {
             }
         }
         format!("skill error: no skill named '{want}' (check the Available skills list)")
+    }
+
+    /// List a directory, anchoring a relative path to the working directory.
+    fn list_dir_wd(&self, path: &str) -> String {
+        let raw = path.trim();
+        let anchored;
+        let p: &str = if raw.is_empty() || raw == "." {
+            &self.working_dir
+        } else if std::path::Path::new(raw).is_absolute() {
+            raw
+        } else {
+            anchored = format!("{}/{}", self.working_dir, raw);
+            &anchored
+        };
+        Self::list_dir(p)
     }
 
     /// List a directory's entries (dirs first, then files; dirs get a trailing
@@ -879,6 +910,7 @@ impl AgentLoop {
             hooks: self.hooks.clone(),
             web: self.web.clone(),
             fallback_models: self.fallback_models.clone(),
+            working_dir: self.working_dir.clone(),
         };
         let limits = LoopLimits {
             max_iterations: 15,

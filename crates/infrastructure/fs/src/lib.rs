@@ -23,11 +23,40 @@ const SKIP_DIRS: &[&str] = &[
     ".cache",
 ];
 
-/// Simple host-filesystem implementation of [`FileSystemPort`].
-#[derive(Debug, Clone, Default)]
-pub struct HostFileSystem;
+/// Simple host-filesystem implementation of [`FileSystemPort`]. All relative
+/// paths (reads, writes, and glob/grep roots) resolve against [`Self::root`],
+/// which defaults to the process working directory. An embedding host anchors
+/// a run to its worktree with [`HostFileSystem::rooted`] instead of relying on
+/// the process CWD (which, in-process, is the host's, not the run's).
+#[derive(Debug, Clone)]
+pub struct HostFileSystem {
+    root: PathBuf,
+}
+
+impl Default for HostFileSystem {
+    fn default() -> Self {
+        Self {
+            root: PathBuf::from("."),
+        }
+    }
+}
 
 impl HostFileSystem {
+    /// A filesystem rooted at `root`; relative paths resolve against it.
+    pub fn rooted(root: impl Into<PathBuf>) -> Self {
+        Self { root: root.into() }
+    }
+
+    /// Resolve a caller path against the root (absolute paths pass through).
+    fn resolve(&self, path: &str) -> PathBuf {
+        let p = Path::new(path);
+        if p.is_absolute() {
+            p.to_path_buf()
+        } else {
+            self.root.join(p)
+        }
+    }
+
     /// Recursively walk `root` yielding every file whose `Pattern` matches,
     /// skipping hidden dirs and well-known build/vendor dirs.
     fn collect_matches(
@@ -72,7 +101,7 @@ impl HostFileSystem {
 #[async_trait]
 impl FileSystemPort for HostFileSystem {
     async fn read(&self, path: &str) -> Result<String, FsError> {
-        match tokio::fs::read_to_string(path).await {
+        match tokio::fs::read_to_string(self.resolve(path)).await {
             Ok(content) => Ok(content),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
                 Err(FsError::NotFound(path.to_string()))
@@ -85,7 +114,11 @@ impl FileSystemPort for HostFileSystem {
     }
 
     async fn write(&self, path: &str, content: &str) -> Result<(), FsError> {
-        tokio::fs::write(path, content)
+        let full = self.resolve(path);
+        if let Some(parent) = full.parent() {
+            let _ = tokio::fs::create_dir_all(parent).await;
+        }
+        tokio::fs::write(full, content)
             .await
             .map_err(|e| FsError::Io(e.to_string()))
     }
@@ -97,8 +130,8 @@ impl FileSystemPort for HostFileSystem {
             Err(_) => return Vec::new(),
         };
         // The `glob` crate matches against full paths. Restrict matching to the
-        // relative path only.
-        let root = PathBuf::from(".");
+        // path relative to the root only.
+        let root = self.root.clone();
         let mut out = Vec::new();
         let ignore: Vec<String> = options.ignore.iter().flat_map(|s| s.split(',')).map(|s| s.trim().to_string()).collect();
         Self::collect_matches(
@@ -130,7 +163,7 @@ impl FileSystemPort for HostFileSystem {
             Ok(p) => p,
             Err(_) => return Ok(Vec::new()),
         };
-        let root = PathBuf::from(".");
+        let root = self.root.clone();
         let mut matches = Vec::new();
         let mut pending: Vec<PathBuf> = vec![root.clone()];
         let mut scanned: std::collections::HashSet<PathBuf> = std::collections::HashSet::new();
@@ -154,7 +187,8 @@ impl FileSystemPort for HostFileSystem {
                     }
                     continue;
                 }
-                let rel = path.to_string_lossy().replace('\\', "/");
+                let rel_path = path.strip_prefix(&root).unwrap_or(&path);
+                let rel = rel_path.to_string_lossy().replace('\\', "/");
                 let rel_trim = rel.trim_start_matches("./");
                 if !matcher.matches(rel_trim) {
                     continue;
@@ -191,7 +225,8 @@ impl FileSystemPort for HostFileSystem {
         old_string: &str,
         new_string: &str,
     ) -> Result<usize, FsError> {
-        let content = match std::fs::read_to_string(path) {
+        let full = self.resolve(path);
+        let content = match std::fs::read_to_string(&full) {
             Ok(c) => c,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
                 return Err(FsError::NotFound(path.to_string()))
@@ -239,6 +274,26 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn rooted_anchors_read_write_and_glob() {
+        let dir = std::env::temp_dir().join(format!("hx-rooted-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("src")).unwrap();
+        std::fs::write(dir.join("src/main.rs"), "fn main() {}").unwrap();
+        let fs = HostFileSystem::rooted(&dir);
+        // Relative read resolves against root, not the process CWD.
+        assert_eq!(fs.read("src/main.rs").await.unwrap(), "fn main() {}");
+        // Relative write lands under root (creating parent dirs).
+        fs.write("out/new.txt", "hi").await.unwrap();
+        assert_eq!(std::fs::read_to_string(dir.join("out/new.txt")).unwrap(), "hi");
+        // Glob walks from root and returns root-relative paths.
+        let files = fs.glob("**/*.rs", &GlobOptions::default()).await;
+        assert!(files.iter().any(|f| f == "src/main.rs"), "{files:?}");
+        // Grep too.
+        let hits = fs.grep("fn main", "**/*.rs", 10).await.unwrap();
+        assert_eq!(hits[0].path, "src/main.rs");
+    }
+
+    #[tokio::test]
     async fn glob_finds_nested_sources_and_skips_target() {
         let root = tmpdir("glob");
         std::fs::create_dir_all(root.join("src/deep")).unwrap();
@@ -250,7 +305,7 @@ mod tests {
         // Run from inside the temp dir.
         let prev = std::env::current_dir().unwrap();
         std::env::set_current_dir(&root).unwrap();
-        let fs = HostFileSystem;
+        let fs = HostFileSystem::default();
         let files = fs.glob("**/*.rs", &GlobOptions::default()).await;
         std::env::set_current_dir(prev).unwrap();
 
@@ -264,7 +319,7 @@ mod tests {
         let root = tmpdir("replace");
         let file = root.join("a.txt");
         std::fs::write(&file, "hello world hello").unwrap();
-        let fs = HostFileSystem;
+        let fs = HostFileSystem::default();
         // "hello" appears twice -> must fail.
         assert!(fs.replace(file.to_str().unwrap(), "hello", "bye").await.is_err());
         // unique substring -> succeeds.
