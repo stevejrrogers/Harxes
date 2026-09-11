@@ -569,7 +569,20 @@ impl LlmPort for OpenAiClient {
 
         let mut stream = resp.bytes_stream();
         let mut buf = Vec::<u8>::new();
-        while let Some(chunk) = stream.next().await {
+        // Per-chunk inactivity deadline. The client-level read_timeout does
+        // not reliably bound streaming body reads, and a provider that stalls
+        // mid-stream (observed live: GLM-5.3 stopping without closing) would
+        // otherwise hang this await forever — freezing the whole run AND
+        // leaking a server-side parallel-request slot until the key starves.
+        const CHUNK_IDLE: std::time::Duration = std::time::Duration::from_secs(150);
+        loop {
+            let step = tokio::time::timeout(CHUNK_IDLE, stream.next()).await;
+            let Ok(next) = step else {
+                return Err(LlmError::Request(
+                    "stream stalled: no chunk for 150s (provider stopped mid-stream)".to_owned(),
+                ));
+            };
+            let Some(chunk) = next else { break };
             let chunk = match chunk {
                 Ok(c) => c,
                 Err(e) => return Err(LlmError::Request(format!("stream error : {e}"))),
