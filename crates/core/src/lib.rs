@@ -610,6 +610,7 @@ mod tests {
                 let n = self.0.fetch_add(1, Ordering::SeqCst);
                 if n == 0 {
                     Ok(AgentResponse {
+                reasoning: String::new(),
                         content: String::new(),
                         usage: TokenUsage::new(100, 20),
                         tool_calls: vec![ToolCall {
@@ -692,6 +693,7 @@ mod tests {
                 let n = self.0.fetch_add(1, Ordering::SeqCst);
                 if n == 0 {
                     Ok(AgentResponse {
+                reasoning: String::new(),
                         content: String::new(),
                         usage: Default::default(),
                         tool_calls: vec![ToolCall {
@@ -798,6 +800,7 @@ mod tests {
                 let n = self.0.fetch_add(1, Ordering::SeqCst);
                 if n == 0 {
                     Ok(AgentResponse {
+                reasoning: String::new(),
                         content: String::new(),
                         usage: Default::default(),
                         tool_calls: vec![ToolCall {

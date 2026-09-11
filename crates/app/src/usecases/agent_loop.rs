@@ -1358,7 +1358,23 @@ impl AgentLoop {
                 // finish a tool sequence emitting only hidden reasoning) must
                 // never render as a blank screen.
                 let final_text = if resp.content.trim().is_empty() {
-                    "(the model finished without a text reply — it may consider the task done, or need a more specific instruction)".to_string()
+                    // Salvage a reasoning-only completion: some models (GLM)
+                    // put the entire answer in the reasoning channel. The
+                    // tail is where a final answer lives.
+                    let r = resp.reasoning.trim();
+                    if r.is_empty() {
+                        "(the model finished without a text reply — it may consider the task done, or need a more specific instruction)".to_string()
+                    } else {
+                        let tail: String = r
+                            .chars()
+                            .rev()
+                            .take(4000)
+                            .collect::<Vec<_>>()
+                            .into_iter()
+                            .rev()
+                            .collect();
+                        tail
+                    }
                 } else {
                     resp.content.clone()
                 };
@@ -1990,6 +2006,7 @@ mod tests {
         };
         let script = vec![
             AgentResponse {
+                reasoning: String::new(),
                 content: String::new(),
                 usage: Default::default(),
                 tool_calls: vec![bash],
@@ -2027,6 +2044,7 @@ mod tests {
         };
         let script = vec![
             AgentResponse {
+                reasoning: String::new(),
                 content: String::new(),
                 usage: Default::default(),
                 tool_calls: vec![delegate],
@@ -2069,6 +2087,7 @@ mod tests {
         };
         let script = vec![
             AgentResponse {
+                reasoning: String::new(),
                 content: String::new(),
                 usage: Default::default(),
                 tool_calls: vec![delegate],
@@ -2109,6 +2128,7 @@ mod tests {
         };
         let script = vec![
             AgentResponse {
+                reasoning: String::new(),
                 content: String::new(),
                 usage: Default::default(),
                 tool_calls: vec![mark_done],
@@ -2143,6 +2163,7 @@ mod tests {
         };
         let script = vec![
             AgentResponse {
+                reasoning: String::new(),
                 content: String::new(),
                 usage: Default::default(),
                 tool_calls: vec![list],
@@ -2171,6 +2192,7 @@ mod tests {
             arguments: "a.txt".into(),
         };
         let resp = AgentResponse {
+                reasoning: String::new(),
             content: String::new(),
             usage: Default::default(),
             tool_calls: vec![tc()],

@@ -285,6 +285,7 @@ impl LlmPort for AnthropicClient {
             .collect();
 
         Ok(AgentResponse {
+            reasoning: String::new(),
             content: text,
             usage: harxes_core_domain::domain::value_objects::TokenUsage::new(
                 rb.usage.input_tokens,
@@ -479,6 +480,7 @@ impl LlmPort for AnthropicClient {
             .map(|(id, name, arguments)| ToolCall { id, name, arguments })
             .collect();
         Ok(AgentResponse {
+            reasoning: String::new(),
             content: text,
             usage: harxes_core_domain::domain::value_objects::TokenUsage::new(
                 input_tokens,

@@ -10,6 +10,9 @@ pub struct AgentResponse {
     pub usage: TokenUsage,
     /// Tool-call requests from the model (empty for a plain text turn).
     pub tool_calls: Vec<ToolCall>,
+    /// Hidden reasoning the provider surfaced (empty when none). Kept so a
+    /// reasoning-only completion can still be salvaged by the host.
+    pub reasoning: String,
 }
 
 /// A unit of streaming output emitted as a provider streams its reply.
@@ -33,6 +36,7 @@ impl AgentResponse {
             content: content.into(),
             usage,
             tool_calls: vec![],
+            reasoning: String::new(),
         }
     }
 }

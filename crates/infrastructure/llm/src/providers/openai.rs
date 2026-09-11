@@ -501,6 +501,7 @@ impl LlmPort for OpenAiClient {
                     })
                     .collect();
                 Ok(AgentResponse {
+                    reasoning: String::new(),
                     content,
                     usage: TokenUsage::new(rb.usage.prompt_tokens, rb.usage.completion_tokens)
                         .with_reasoning(
@@ -682,9 +683,10 @@ impl LlmPort for OpenAiClient {
         }
         if text.trim().is_empty() && tool_calls.is_empty() && !reasoning.trim().is_empty() {
             sink(StreamEvent::Text(reasoning.clone()));
-            text = reasoning;
+            text = reasoning.clone();
         }
         Ok(AgentResponse {
+            reasoning,
             content: text,
             usage: TokenUsage::new(prompt_tokens, completion_tokens)
                 .with_reasoning(reasoning_tokens),
