@@ -491,6 +491,7 @@ dependencies = [
  "futures-util",
  "harxes-core-domain",
  "serde",
+ "serde_json",
  "thiserror",
  "tokio",
 ]

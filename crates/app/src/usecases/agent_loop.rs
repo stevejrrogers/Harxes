@@ -254,7 +254,14 @@ impl AgentLoop {
                 .strip_prefix(call.name.as_str())
                 .map(|s| s.trim())
                 .unwrap_or(&summary);
-            obs.on_tool_start(call.name.as_str(), arg);
+            // Write/Edit carry the actual code: attach a bounded excerpt as
+            // extra lines so live-log consumers can show WHAT is being
+            // written, not just the path (multi-line summaries render as a
+            // click-to-open preview).
+            match code_preview(call.name.as_str(), call.arguments.as_str()) {
+                Some(code) => obs.on_tool_start(call.name.as_str(), &format!("{arg}\n{code}")),
+                None => obs.on_tool_start(call.name.as_str(), arg),
+            }
         }
         // pre_tool hooks may veto the call (exit code 2).
         if let Some(block_reason) = self.run_pre_hooks(call).await {
@@ -1580,6 +1587,49 @@ impl crate::ports::AgentPort for AgentLoop {
             transcript: final_transcript,
         })
     }
+}
+
+
+/// Bounded code excerpt for Write/Edit tool calls: what the agent is actually
+/// putting into the file, shaped for a live-log preview. `None` for other
+/// tools or empty payloads.
+fn code_preview(name: &str, raw_args: &str) -> Option<String> {
+    let v: serde_json::Value = serde_json::from_str(raw_args).ok()?;
+    let field = |k: &str| v.get(k).and_then(|x| x.as_str()).unwrap_or_default();
+    let clip = |text: &str, max: usize, prefix: &str| -> String {
+        let mut out = String::new();
+        let mut n = 0usize;
+        for l in text.lines() {
+            if n == max {
+                out.push_str(&format!("{prefix}… (+{} more lines)\n", text.lines().count() - max));
+                break;
+            }
+            out.push_str(prefix);
+            out.push_str(l);
+            out.push('\n');
+            n += 1;
+        }
+        out
+    };
+    let lower = name.to_ascii_lowercase();
+    let body = if lower == "write" {
+        let c = field("content");
+        if c.trim().is_empty() {
+            return None;
+        }
+        clip(c, 30, "")
+    } else if lower == "edit" {
+        let old = field("old_string");
+        let new = field("new_string");
+        if old.trim().is_empty() && new.trim().is_empty() {
+            return None;
+        }
+        format!("{}{}", clip(old, 12, "- "), clip(new, 24, "+ "))
+    } else {
+        return None;
+    };
+    let trimmed = body.trim_end().to_string();
+    if trimmed.is_empty() { None } else { Some(trimmed) }
 }
 
 #[cfg(test)]
