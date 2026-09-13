@@ -1311,10 +1311,38 @@ impl AgentLoop {
         let mut total_reasoning: Option<u64> = None;
         let mut truncated = false;
 
+        let mut budget_warned = 0u8;
         loop {
             if iterations >= limits.max_iterations {
                 truncated = true;
                 break;
+            }
+            // Budget awareness: the model has no idea a guardrail exists and
+            // explores until the cap kills the run. Tell it — once at 2/3 and
+            // once at 90% — so it can pivot from exploring to finishing while
+            // there is still budget to do so.
+            let cap = limits.max_iterations;
+            let warn_at = |pct_num: usize| cap.saturating_mul(pct_num) / 100;
+            let due = if budget_warned == 0 && iterations >= warn_at(66) {
+                Some((1u8, cap - iterations))
+            } else if budget_warned == 1 && iterations >= warn_at(90) {
+                Some((2u8, cap - iterations))
+            } else {
+                None
+            };
+            if let Some((stage, left)) = due {
+                budget_warned = stage;
+                let urgency = if stage == 1 {
+                    "Stop exploring NOW: implement the remaining changes, run the tests, and finish."
+                } else {
+                    "FINAL WARNING: finish IMMEDIATELY — make the last edit, run the tests once, and write your final summary."
+                };
+                transcript.push(Message::new(
+                    Role::User,
+                    format!(
+                        "[BUDGET] Only {left} loop iterations remain before this run is cut                          off and all uncommitted analysis is lost. {urgency}"
+                    ),
+                ));
             }
             // Age out old tool outputs: the model already consumed them, and
             // re-sending large results every iteration is the dominant input
