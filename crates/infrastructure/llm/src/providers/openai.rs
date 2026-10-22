@@ -9,21 +9,21 @@ use harxes_core_domain::ports::{AgentResponse, LlmError, LlmPort, StreamSink};
 use serde::Serialize;
 
 #[derive(Serialize)]
-struct FunctionDef<'a> {
+pub(crate) struct FunctionDef<'a> {
     name: &'a str,
     description: &'a str,
     parameters: serde_json::Value,
 }
 
 #[derive(Serialize)]
-struct ToolDef<'a> {
+pub(crate) struct ToolDef<'a> {
     #[serde(rename = "type")]
     kind: &'static str,
     function: FunctionDef<'a>,
 }
 
 #[derive(Serialize)]
-struct RequestToolCall<'a> {
+pub(crate) struct RequestToolCall<'a> {
     id: &'a str,
     #[serde(rename = "type")]
     kind: &'static str,
@@ -31,13 +31,13 @@ struct RequestToolCall<'a> {
 }
 
 #[derive(Serialize)]
-struct RequestFunction<'a> {
+pub(crate) struct RequestFunction<'a> {
     name: &'a str,
     arguments: &'a str,
 }
 
 #[derive(Serialize)]
-struct ApiMessage<'a> {
+pub(crate) struct ApiMessage<'a> {
     role: &'a str,
     #[serde(skip_serializing_if = "Option::is_none")]
     content: Option<serde_json::Value>,
@@ -191,7 +191,7 @@ async fn http_error(resp: reqwest::Response, hint: &str) -> LlmError {
 }
 
 #[derive(Serialize)]
-struct RequestBody<'a> {
+pub(crate) struct RequestBody<'a> {
     model: &'a str,
     messages: Vec<ApiMessage<'a>>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -203,18 +203,18 @@ struct RequestBody<'a> {
 }
 
 #[derive(serde::Deserialize)]
-struct ResponseBody {
+pub(crate) struct ResponseBody {
     choices: Vec<Choice>,
     usage: Usage,
 }
 
 #[derive(serde::Deserialize)]
-struct Choice {
+pub(crate) struct Choice {
     message: ResponseMessage,
 }
 
 #[derive(serde::Deserialize)]
-struct ResponseMessage {
+pub(crate) struct ResponseMessage {
     content: Option<String>,
     /// Reasoning-model channel (DeepSeek, GLM, o-series via proxies). Only
     /// used as a fallback when `content` comes back empty.
@@ -225,18 +225,18 @@ struct ResponseMessage {
 }
 
 #[derive(serde::Deserialize)]
-struct ResponseToolCall {
+pub(crate) struct ResponseToolCall {
     id: String,
     function: ResponseFunction,
 }
 #[derive(serde::Deserialize)]
-struct ResponseFunction {
+pub(crate) struct ResponseFunction {
     name: String,
     arguments: String,
 }
 
 #[derive(serde::Deserialize)]
-struct Usage {
+pub(crate) struct Usage {
     prompt_tokens: u64,
     completion_tokens: u64,
     #[serde(default)]
@@ -244,7 +244,7 @@ struct Usage {
 }
 
 #[derive(serde::Deserialize)]
-struct CompletionDetails {
+pub(crate) struct CompletionDetails {
     #[serde(default)]
     reasoning_tokens: Option<u64>,
 }
@@ -259,7 +259,7 @@ enum Auth {
 
 /// GitHub Copilot token exchange: swaps a long-lived GitHub OAuth token for a
 /// short-lived (~25 min) Copilot bearer, cached until just before it expires.
-struct CopilotAuth {
+pub(crate) struct CopilotAuth {
     github_token: String,
     // (bearer, expires_at_unix_secs)
     cached: tokio::sync::Mutex<Option<(String, u64)>>,

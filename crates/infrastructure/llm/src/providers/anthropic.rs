@@ -6,7 +6,7 @@ use harxes_core_domain::ports::{AgentResponse, LlmError, LlmPort, StreamSink};
 use serde::Serialize;
 
 #[derive(Serialize)]
-struct RequestBody<'a> {
+pub(crate) struct RequestBody<'a> {
     model: &'a str,
     max_tokens: u32,
     system: Option<serde_json::Value>,
@@ -29,13 +29,13 @@ fn thinking_block(effort: Option<ReasoningEffort>) -> Option<serde_json::Value> 
 }
 
 #[derive(serde::Deserialize)]
-struct ResponseBody {
+pub(crate) struct ResponseBody {
     content: Vec<ContentBlock>,
     usage: Usage,
 }
 
 #[derive(serde::Deserialize)]
-struct ContentBlock {
+pub(crate) struct ContentBlock {
     #[serde(rename = "type")]
     kind: String,
     text: Option<String>,
@@ -46,7 +46,7 @@ struct ContentBlock {
 }
 
 #[derive(serde::Deserialize)]
-struct Usage {
+pub(crate) struct Usage {
     input_tokens: u64,
     output_tokens: u64,
 }
