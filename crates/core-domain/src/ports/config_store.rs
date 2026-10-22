@@ -17,6 +17,8 @@ pub struct ModelPricing {
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct HarxesConfig {
+    /// Absent key = no provider selected yet (first-run/pre-v0 configs omit it).
+    #[serde(default)]
     pub active_provider: Option<String>,
     /// provider_id -> config
     #[serde(default)]

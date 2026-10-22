@@ -3,6 +3,7 @@ use serde::{Deserialize, Serialize};
 use super::tool_call::ToolCall;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum Role {
     System,
     User,
@@ -27,8 +28,12 @@ pub struct Message {
     pub role: Role,
     pub content: String,
     /// Populated for [`Role::Assistant`] messages that request tool use.
+    /// `default`: the wire may omit it (a plain text turn sends none).
+    #[serde(default)]
     pub tool_calls: Vec<ToolCall>,
     /// Populated for [`Role::Tool`] messages linking back to a call id.
+    /// `default`: the wire may omit it (only tool-result messages carry one).
+    #[serde(default)]
     pub tool_call_id: Option<String>,
     /// Images attached to a [`Role::User`] message (vision input).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
