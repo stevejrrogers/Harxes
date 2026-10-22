@@ -10,6 +10,7 @@ mod session;
 mod shell;
 mod tool_observer;
 mod web;
+mod wire_registry;
 
 // Re-exports form the hexagonal "driven interface" surface that infrastructure
 // adapters implement and application services consume.
@@ -26,3 +27,4 @@ pub use session::{SessionRecord, SessionStoreError, SessionStorePort};
 pub use shell::{CommandOutput, ShellError, ShellExitStatus, ShellPort};
 pub use tool_observer::ToolObserver;
 pub use web::WebPort;
+pub use wire_registry::WireType;
