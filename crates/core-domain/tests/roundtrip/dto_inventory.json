@@ -1,0 +1,27 @@
+{
+  "$schema": "cxa-b305a.dto-inventory/v1",
+  "description": "Source-of-truth inventory of every public transport DTO crossing the wire (serde serde_json). Maintained by CXA-B305a [1/3]; round-trip coverage asserted in transport_coverage.rs.",
+  "wire_format": "json",
+  "dtos": [
+    { "name": "ProviderConfig",   "module_path": "harxes_core_domain::ports::config_store::ProviderConfig",   "format": "json" },
+    { "name": "ModelPricing",     "module_path": "harxes_core_domain::ports::config_store::ModelPricing",     "format": "json" },
+    { "name": "HarxesConfig",     "module_path": "harxes_core_domain::ports::config_store::HarxesConfig",     "format": "json" },
+    { "name": "LimitsConfig",     "module_path": "harxes_core_domain::ports::config_store::LimitsConfig",     "format": "json" },
+    { "name": "HookRule",         "module_path": "harxes_core_domain::ports::config_store::HookRule",         "format": "json" },
+    { "name": "HooksConfig",      "module_path": "harxes_core_domain::ports::config_store::HooksConfig",      "format": "json" },
+    { "name": "McpServerConfig",  "module_path": "harxes_core_domain::ports::config_store::McpServerConfig",  "format": "json" },
+    { "name": "Role",             "module_path": "harxes_core_domain::domain::value_objects::message::Role",                "format": "json" },
+    { "name": "ImageData",        "module_path": "harxes_core_domain::domain::value_objects::message::ImageData",           "format": "json" },
+    { "name": "Message",          "module_path": "harxes_core_domain::domain::value_objects::message::Message",             "format": "json" },
+    { "name": "ToolCall",         "module_path": "harxes_core_domain::domain::value_objects::tool_call::ToolCall",          "format": "json" },
+    { "name": "TodoStatus",       "module_path": "harxes_core_domain::domain::value_objects::todo::TodoStatus",             "format": "json" },
+    { "name": "TodoItem",         "module_path": "harxes_core_domain::domain::value_objects::todo::TodoItem",               "format": "json" },
+    { "name": "TokenUsage",       "module_path": "harxes_core_domain::domain::value_objects::token_usage::TokenUsage",      "format": "json" },
+    { "name": "PermissionPolicy", "module_path": "harxes_core_domain::domain::value_objects::permission::PermissionPolicy", "format": "json" },
+    { "name": "ReasoningEffort",  "module_path": "harxes_core_domain::domain::value_objects::reasoning::ReasoningEffort",   "format": "json" },
+    { "name": "ProviderId",       "module_path": "harxes_core_domain::domain::value_objects::provider_id::ProviderId",      "format": "json" },
+    { "name": "ModelId",          "module_path": "harxes_core_domain::domain::value_objects::model_id::ModelId",            "format": "json" },
+    { "name": "ToolKind",         "module_path": "harxes_core_domain::domain::entities::tool::ToolKind",                    "format": "json" },
+    { "name": "SessionRecord",    "module_path": "harxes_core_domain::ports::session::SessionRecord",                       "format": "json" }
+  ]
+}
