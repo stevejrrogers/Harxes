@@ -1,5 +1,6 @@
 mod context_window;
 mod message;
+mod sweep_run_summary;
 mod model_id;
 mod permission;
 mod reasoning;
@@ -13,6 +14,10 @@ pub use context_window::{
     trim_to_budget,
 };
 pub use message::{ImageData, Message, Role};
+pub use sweep_run_summary::{
+    AttributedCause, FinishedSummary, RecordingSummary, RunAttribution, RunEventTelemetry,
+    RunTrigger, SweepRunSummary, TimingBlock, ToolCounters,
+};
 pub use model_id::{InvalidModelId, ModelId};
 pub use reasoning::ReasoningEffort;
 pub use permission::{CommandPolicy, CommandVerdict, FsOp, PermissionPolicy};

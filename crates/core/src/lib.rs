@@ -24,7 +24,12 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use harxes_app::usecases::agent_loop::{AgentLoop, LoopOutcome};
-use harxes_core_domain::domain::value_objects::{ProviderId, Role};
+use harxes_app::usecases::run_recorder::RunRecorder;
+use harxes_core_domain::domain::value_objects::{
+    ProviderId, Role, RunAttribution, RunEventTelemetry, SweepRunSummary,
+};
+#[allow(unused_imports)]
+use harxes_core_domain::domain::value_objects::{FinishedSummary as _, RecordingSummary as _};
 use harxes_core_domain::ports::{LlmError, LlmPort, PermissionDecider, ToolObserver};
 
 // Re-export everything a caller needs to build an [`EngineConfig`] and read
@@ -41,6 +46,7 @@ pub use harxes_core_domain::ports::{
 /// engine never reads process environment or a keychain.
 #[derive(Debug, Clone)]
 pub enum ProviderSpec {
+
     /// Anthropic Messages API. `base_url` is the full endpoint.
     Anthropic { base_url: String, api_key: String },
     /// Any OpenAI-compatible Chat Completions endpoint (OpenAI, LiteLLM,
@@ -138,6 +144,9 @@ pub struct RunRequest {
     /// Per-run reasoning-effort override; falls back to
     /// [`EngineConfig::reasoning_effort`] when `None`.
     pub reasoning_effort: Option<ReasoningEffort>,
+    /// Who/what started this run. `None` defaults to a `chat` trigger with an
+    /// anonymous actor so every outcome still carries attribution data.
+    pub attribution: Option<RunAttribution>,
 }
 
 /// A live event emitted while a run executes. Consumed off the event channel.
@@ -180,6 +189,24 @@ pub enum RunEvent {
     Retry { wait_secs: u64 },
 }
 
+/// Placeholder finished summary for a run whose recorder never observed any
+/// telemetry (e.g. `RunOutcome::from_loop` used directly in tests). Carries the
+/// default chat attribution and zeroed counters — stamped over by the driver
+/// on every real engine run.
+fn summary_placeholder() -> harxes_core_domain::domain::value_objects::FinishedSummary {
+    use harxes_core_domain::domain::value_objects::FinishedSummary;
+    FinishedSummary {
+        attribution: RunAttribution::chat("anonymous"),
+        tool_counters: Default::default(),
+        timing: Default::default(),
+        iterations: 0,
+        retries: 0,
+        delegation_depth_max: 0,
+        guardrail_stop: false,
+        attribution_cause: None,
+    }
+}
+
 /// Why a run stopped. Machine-readable for the host's classifier.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum StopReason {
@@ -202,6 +229,10 @@ pub struct RunOutcome {
     /// Reasoning tokens (subset of output), when the provider reports them.
     pub reasoning_tokens: Option<u64>,
     pub stop_reason: StopReason,
+    /// Structured, attributed record of this run (pure projection over the
+    /// collected telemetry; persisted in part 2). `Recording` is impossible on
+    /// a resolved outcome — the driver stamps it before returning.
+    pub summary: SweepRunSummary,
 }
 
 impl RunOutcome {
@@ -219,6 +250,9 @@ impl RunOutcome {
             } else {
                 StopReason::Done
             },
+            // Replaced by the driver's `stamp_summary` before the outcome is
+            // handed to any host; this placeholder keeps `from_loop` pure.
+            summary: SweepRunSummary::Finished(crate::summary_placeholder()),
         }
     }
 }
@@ -289,9 +323,22 @@ impl PermissionDecider for HeadlessDecider {
     }
 }
 
-/// Bridges the loop's [`ToolObserver`] callbacks onto the run's event channel.
+impl EventObserver {
+    /// Fold one telemetry item into the shared recorder. The loop may invoke
+    /// observers from multiple turn tasks (concurrent read-only tools), hence
+    /// the mutex — the fold itself stays total and order-insensitive.
+    fn feed(&self, ev: RunEventTelemetry) {
+        if let Ok(mut rec) = self.recorder.lock() {
+            rec.observe(&ev);
+        }
+    }
+}
+
+/// Bridges the loop's [`ToolObserver`] callbacks onto the run's event channel,
+/// feeding the run summary recorder alongside it.
 struct EventObserver {
     tx: tokio::sync::mpsc::UnboundedSender<RunEvent>,
+    recorder: std::sync::Arc<std::sync::Mutex<RunRecorder>>,
 }
 impl ToolObserver for EventObserver {
     fn on_tool_start(&self, name: &str, args_preview: &str) {
@@ -302,6 +349,11 @@ impl ToolObserver for EventObserver {
     }
     fn on_tool_result(&self, name: &str, result_preview: &str) {
         // Fallback path (rich telemetry unavailable): emit with neutral values.
+        self.feed(RunEventTelemetry::ToolEnd {
+            tool: name.to_string(),
+            duration_ms: 0,
+            ok: true,
+        });
         let _ = self.tx.send(RunEvent::ToolEnd {
             name: name.to_string(),
             summary: result_preview.to_string(),
@@ -310,6 +362,11 @@ impl ToolObserver for EventObserver {
         });
     }
     fn on_tool_end(&self, name: &str, result_preview: &str, duration_ms: u64, ok: bool) {
+        self.feed(RunEventTelemetry::ToolEnd {
+            tool: name.to_string(),
+            duration_ms,
+            ok,
+        });
         let _ = self.tx.send(RunEvent::ToolEnd {
             name: name.to_string(),
             summary: result_preview.to_string(),
@@ -325,6 +382,7 @@ impl ToolObserver for EventObserver {
         reasoning_tokens: Option<u64>,
         context_tokens: u64,
     ) {
+        self.feed(RunEventTelemetry::Iteration { n });
         let _ = self.tx.send(RunEvent::Iteration {
             n,
             input_tokens,
@@ -334,6 +392,7 @@ impl ToolObserver for EventObserver {
         });
     }
     fn on_retry(&self, wait_secs: u64) {
+        self.feed(RunEventTelemetry::Retry { wait_secs });
         let _ = self.tx.send(RunEvent::Retry { wait_secs });
     }
     fn on_reasoning(&self, text: &str) {
@@ -342,6 +401,31 @@ impl ToolObserver for EventObserver {
     fn on_stream_delta(&self, text: &str) {
         let _ = self.tx.send(RunEvent::Text(text.to_string()));
     }
+}
+
+/// Freeze the run's summary onto a successful outcome. Pure with respect to
+/// the recorder: elapsed comes from the monotonic clock stamped at driver
+/// start, guardrail attribution from the loop's own stop reason.
+fn stamp_summary(
+    outcome: RunOutcome,
+    recorder: &std::sync::Arc<std::sync::Mutex<RunRecorder>>,
+    started_at: std::time::Instant,
+) -> Result<RunOutcome, EngineError> {
+    let elapsed_ms = u64::try_from(started_at.elapsed().as_millis()).unwrap_or(u64::MAX);
+    let guardrail_stop = matches!(outcome.stop_reason, StopReason::Guardrail);
+    // Observability never blocks correctness: any lock/finish failure returns
+    // the outcome un-stamped rather than erroring the run.
+    if let Ok(rec) = recorder.lock() {
+        // The recorder Arc is shared with the live EventObserver; finishing via
+        // a clone of the accumulated state keeps the observer free to drop.
+        let snapshot = rec.clone();
+        if let Ok(finished) = snapshot.finish(elapsed_ms, guardrail_stop, Some(outcome.iterations)) {
+            let mut o = outcome;
+            o.summary = SweepRunSummary::Finished(finished);
+            return Ok(o);
+        }
+    }
+    Ok(outcome)
 }
 
 /// The cancel-safe future that drives a run to its outcome. Dropping it aborts
@@ -469,6 +553,11 @@ impl HarxesEngine {
     /// the driver future is polled.
     pub fn run(&self, req: RunRequest) -> RunHandle {
         let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<RunEvent>();
+        // Every run gets attribution: explicit from the host or a chat/anonymous
+        // default — so every outcome's summary always carries attributed data.
+        let attribution =
+            req.attribution.clone().unwrap_or_else(|| RunAttribution::chat("anonymous"));
+        let recorder = std::sync::Arc::new(std::sync::Mutex::new(RunRecorder::new(attribution)));
         let decider = Arc::new(HeadlessDecider {
             allow: self.permission == PermissionMode::AllowUnlessDenied,
         });
@@ -482,7 +571,7 @@ impl HarxesEngine {
         };
         let mut agent = AgentLoop::new(self.llm.clone(), self.shell.clone(), fs)
             .with_streaming(true)
-            .with_observer(Arc::new(EventObserver { tx }))
+            .with_observer(Arc::new(EventObserver { tx, recorder: recorder.clone() }))
             .with_decider(decider)
             .with_command_policy(self.command_policy.clone());
         if let Some(wd) = &req.working_dir {
@@ -508,6 +597,9 @@ impl HarxesEngine {
         transcript.push(Message::new(Role::User, req.prompt));
 
         let driver = Box::pin(async move {
+            // Stamp the run's start time so the summary can report elapsed ms
+            // even if the host never provides a wall-clock stamp.
+            let started_at = std::time::Instant::now();
             let work = async move {
                 let (outcome, final_transcript) = agent
                     .run_transcript(&provider_id, &model, transcript, &limits)
@@ -515,15 +607,23 @@ impl HarxesEngine {
                     .map_err(EngineError::from_llm)?;
                 Ok(RunOutcome::from_loop(outcome, final_transcript))
             };
+            let stamp = |r: Result<RunOutcome, EngineError>| {
+                // `timeout` returns the inner result; only success carries an
+                // outcome to stamp (errors carry no run data at all).
+                match r {
+                    Ok(o) => stamp_summary(o, &recorder, started_at),
+                    Err(e) => Err(e),
+                }
+            };
             match timeout {
                 // On elapse the inner `work` future is dropped here, which drops
                 // the AgentLoop run future and (via kill-on-drop) SIGKILLs any
                 // in-flight Bash process group.
                 Some(d) => match tokio::time::timeout(d, work).await {
-                    Ok(r) => r,
+                    Ok(r) => stamp(r),
                     Err(_) => Err(EngineError::Timeout),
                 },
-                None => work.await,
+                None => stamp(work.await),
             }
         });
 
@@ -671,6 +771,34 @@ mod tests {
         assert_eq!(out.stop_reason, StopReason::Done);
         // transcript: user + assistant (no system supplied).
         assert!(out.transcript.iter().any(|m| m.role == Role::User));
+    }
+
+    /// Every resolved outcome carries a Finished summary whose aggregates
+    /// reflect the telemetry the run actually emitted (CXA-F438 part 1 seam).
+    #[tokio::test]
+    async fn stamped_summary_reflects_run_telemetry() {
+        let e = engine_with(Arc::new(EchoLlm), Arc::new(harxes_infra_shell::TokioCommandShell::new(5)));
+        let out = e
+            .run(RunRequest {
+                prompt: "go".into(),
+                attribution: Some(RunAttribution::scheduled("cron:test")),
+                ..Default::default()
+            })
+            .wait()
+            .await
+            .unwrap();
+        match &out.summary {
+            SweepRunSummary::Finished(f) => {
+                assert_eq!(f.attribution.trigger.as_str(), "scheduled_sweep");
+                assert_eq!(f.attribution.actor, "cron:test");
+                // EchoLlm runs one iteration with no tool calls; counters may be
+                // zero but the envelope must always be Finished.
+                assert!(f.timing.duration_elapsed_ms < 60_000);
+            }
+            SweepRunSummary::Recording(_) => {
+                panic!("resolved outcome must never carry a Recording summary")
+            }
+        }
     }
 
     #[tokio::test]
